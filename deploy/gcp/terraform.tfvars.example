@@ -1,0 +1,4 @@
+project         = "my-gcp-project"
+region          = "asia-northeast3"
+zone            = "asia-northeast3-a"
+app_db_password = "change-me-app" # same as APP_DB_PASSWORD in deploy/*/.env

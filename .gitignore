@@ -1,0 +1,17 @@
+# secrets
+deploy/**/.env
+*.tfvars
+!*.tfvars.example
+
+# terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+
+# build / local
+/spillway
+/bin/
+*.exe
+results/
+.DS_Store

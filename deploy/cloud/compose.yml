@@ -1,0 +1,122 @@
+# Spillway — cloud site, runs on the anchor VM (see deploy/gcp).
+#
+# All services share the Tailscale container's network namespace, so they
+# reach each other on 127.0.0.1 and the local site over the tailnet.
+# Published on the VM:
+#   :80   edge (public entry point, the URL users open)
+#   :8090 control plane + dashboard (protected by SPILLWAY_TOKEN for changes)
+#   :6432 DB router (firewalled to the VPC; Cloud Run connects here)
+#
+#   cp .env.example .env   # fill in tailnet IPs, secrets, provider settings
+#   docker compose up -d
+name: spillway-cloud
+
+x-app: &app
+  image: ${SPILLWAY_IMAGE:-spillway:latest}
+  init: true
+  network_mode: service:tailscale
+  depends_on: [tailscale]
+  restart: unless-stopped
+
+services:
+  tailscale:
+    image: tailscale/tailscale:stable
+    hostname: spillway-cloud
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      TS_HOSTNAME: spillway-cloud
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_ACCEPT_DNS: "false"
+    volumes: [ts-state:/var/lib/tailscale]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    cap_add: [NET_ADMIN, NET_RAW]
+    ports:
+      - "80:8080"     # edge
+      - "8090:8090"   # control plane / dashboard
+      - "6432:6432"   # DB router for Cloud Run (firewalled to the VPC)
+    restart: unless-stopped
+
+  cloud-db:
+    image: ${SPILLWAY_PG_IMAGE:-spillway-pg:latest}
+    init: true
+    network_mode: service:tailscale
+    depends_on: [tailscale]
+    restart: unless-stopped
+    environment:
+      SITE: cloud
+      ROLE_INIT: standby
+      PRIMARY_HOST: ${LOCAL_TS_IP:?set LOCAL_TS_IP}
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN}
+      REPL_PASSWORD: ${REPL_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    volumes: [cloud-db:/var/lib/postgresql/data]
+
+  dbrouter:
+    <<: *app
+    command: ["dbrouter"]
+    environment:
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN}
+      DBROUTER_LISTEN: ":6432"
+      DBROUTER_ADMIN_LISTEN: "127.0.0.1:7100"
+      DBROUTER_TARGET: ${LOCAL_TS_IP}:5432
+
+  edge:
+    <<: *app
+    command: ["edge"]
+    environment:
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN}
+      EDGE_LISTEN: ":8080"
+      EDGE_ADMIN_LISTEN: "127.0.0.1:8081"
+      EDGE_BACKENDS: local=http://${LOCAL_TS_IP}:8080@local:${LOCAL_UNITS:-1}
+
+  probe:
+    <<: *app
+    command: ["probe"]
+    environment:
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN}
+      PROBE_LISTEN: "127.0.0.1:7200"
+      PROBE_TARGET: http://127.0.0.1:8080
+
+  control:
+    <<: *app
+    command: ["control"]
+    volumes: [control-data:/data]
+    environment:
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost}
+      EVENT_LOG: /data/audit.jsonl
+      CONTROL_LISTEN: ":8090"
+      EDGE_ADMIN_URL: http://127.0.0.1:8081
+      DBROUTER_ADMIN_URL: http://127.0.0.1:7100
+      PROBE_URL: http://127.0.0.1:7200
+      LOCAL_AGENT_URL: http://${LOCAL_TS_IP}:7000
+      CLOUD_AGENT_URL: http://127.0.0.1:7000
+      LOCAL_APP_URL: http://${LOCAL_TS_IP}:8080
+      LOCAL_UNITS: ${LOCAL_UNITS:-1}
+      ROUTER_LOCAL_PG: ${LOCAL_TS_IP}:5432
+      ROUTER_CLOUD_PG: 127.0.0.1:5432
+      CLOUD_PG_FOR_LOCAL: ${CLOUD_TS_IP:?set CLOUD_TS_IP}:5432
+      LOCAL_PG_FOR_CLOUD: ${LOCAL_TS_IP}:5432
+      CLOUD_PROVIDERS: ${CLOUD_PROVIDERS:-cloudrun}
+      CLOUD_WARM_MIN: ${CLOUD_WARM_MIN:-0}
+      BURST_MIN: ${BURST_MIN:-2}
+      BURST_MAX: ${BURST_MAX:-6}
+      EVAC_MIN: ${EVAC_MIN:-2}
+      # GCP Cloud Run (token comes from the VM's service account)
+      GCP_PROJECT: ${GCP_PROJECT:-}
+      GCP_REGION: ${GCP_REGION:-asia-northeast3}
+      CLOUDRUN_SERVICE: ${CLOUDRUN_SERVICE:-spillway-app}
+      CLOUDRUN_URL: ${CLOUDRUN_URL:-}
+      # AWS Fargate (optional second provider)
+      AWS_REGION: ${AWS_REGION:-ap-northeast-2}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      ECS_CLUSTER: ${ECS_CLUSTER:-spillway}
+      ECS_SERVICE: ${ECS_SERVICE:-spillway-app}
+      ECS_ENDPOINT_URL: ${ECS_ENDPOINT_URL:-}
+
+volumes:
+  ts-state: {}
+  cloud-db: {}
+  control-data: {}

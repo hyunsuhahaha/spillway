@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spillway 관제</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f8f9fb; --text: #15171c; --muted: #616a78; --line: #e2e5ea;
+    --local: #0f9d58; --local-soft: #e3f4ea; --cloud: #1a73e8; --cloud-soft: #e6eefc;
+    --warn: #e37400; --warn-soft: #fdf0e1; --bad: #d93025; --bad-soft: #fce8e6; --purple: #7b3fe4; --purple-soft: #efe7fd;
+    --grid: #e9ecf0; --btn: #15171c; --btn-text: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d0f13; --panel: #161920; --panel-2: #1b1f27; --text: #eceef2; --muted: #98a1b0; --line: #282d37;
+      --local: #3cc985; --local-soft: #12301f; --cloud: #72a7ff; --cloud-soft: #152443;
+      --warn: #ffab4a; --warn-soft: #3a2710; --bad: #ff7a70; --bad-soft: #3b1715; --purple: #b18cff; --purple-soft: #2a1e46;
+      --grid: #232833; --btn: #eceef2; --btn-text: #0d0f13; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-bottom: 14px; }
+  .brand { font-size: 20px; font-weight: 750; letter-spacing: -.01em; }
+  .brand small { font-size: 13px; font-weight: 500; color: var(--muted); margin-left: 6px; }
+  .mode { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; font-weight: 700; font-size: 15px; }
+  .mode .dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+  .m-NORMAL { color: var(--local); background: var(--local-soft); }
+  .m-BURST { color: var(--cloud); background: var(--cloud-soft); }
+  .m-EVACUATING, .m-EVACUATED { color: var(--warn); background: var(--warn-soft); }
+  .m-FAILBACK_SYNC, .m-SWITCHING_BACK { color: var(--purple); background: var(--purple-soft); }
+  .m-EVACUATING .dot, .m-SWITCHING_BACK .dot { animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+  .reason { color: var(--muted); flex: 1 1 280px; min-width: 0; }
+  .url { font-weight: 650; font-variant-numeric: tabular-nums; }
+  .grid { display: grid; gap: 12px; }
+  .kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-width: 0; }
+  .kpi .label { color: var(--muted); font-size: 12px; }
+  .kpi .value { font-size: 24px; font-weight: 720; font-variant-numeric: tabular-nums; margin-top: 2px; white-space: nowrap; }
+  .kpi .sub { color: var(--muted); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topo { grid-template-columns: 1fr 1.1fr 1fr; margin-bottom: 12px; align-items: stretch; }
+  h2 { font-size: 13px; font-weight: 650; margin: 0 0 10px; color: var(--muted); letter-spacing: .01em; }
+  h3 { font-size: 16px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+  .row { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: 0; }
+  .row .k { color: var(--muted); }
+  .row .v { text-align: right; font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: anywhere; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 650; white-space: nowrap; }
+  .p-ok { color: var(--local); background: var(--local-soft); }
+  .p-cloud { color: var(--cloud); background: var(--cloud-soft); }
+  .p-warn { color: var(--warn); background: var(--warn-soft); }
+  .p-bad { color: var(--bad); background: var(--bad-soft); }
+  .p-purple { color: var(--purple); background: var(--purple-soft); }
+  .p-mute { color: var(--muted); background: var(--panel-2); }
+  .sdot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .share { height: 12px; border-radius: 6px; overflow: hidden; display: flex; background: var(--panel-2); margin: 8px 0 4px; }
+  .share .l { background: var(--local); transition: width .5s; }
+  .share .c { background: var(--cloud); transition: width .5s; }
+  .legend { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .held { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-weight: 650; }
+  .charts { grid-template-columns: 1fr 1fr; margin-bottom: 12px; }
+  canvas { width: 100%; height: 190px; display: block; }
+  .lower { grid-template-columns: 1fr 1.25fr 1fr; margin-bottom: 12px; align-items: start; }
+  .big { font-size: 30px; font-weight: 750; font-variant-numeric: tabular-nums; }
+  .probe-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
+  .probe-grid .cell { background: var(--panel-2); border-radius: 10px; padding: 10px; }
+  .probe-grid .cell .label { color: var(--muted); font-size: 12px; }
+  .steps { list-style: none; margin: 0; padding: 0; }
+  .steps li { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); align-items: start; }
+  .steps li:first-child { border-top: 0; }
+  .steps .ms { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .steps .detail { grid-column: 2 / 4; color: var(--bad); font-size: 12px; overflow-wrap: anywhere; }
+  .ctl { display: grid; gap: 10px; }
+  .ctl .group { background: var(--panel-2); border-radius: 10px; padding: 10px; }
+  .ctl .group .t { font-weight: 650; margin-bottom: 6px; }
+  .ctl .btns { display: flex; flex-wrap: wrap; gap: 6px; }
+  button { font: inherit; font-weight: 650; border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
+    background: var(--panel); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--btn); color: var(--btn-text); border-color: var(--btn); }
+  button.danger { color: var(--warn); border-color: var(--warn); }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=number], input[type=password] { font: inherit; width: 84px; padding: 6px 8px; border: 1px solid var(--line);
+    border-radius: 8px; background: var(--panel); color: var(--text); }
+  label.inline { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  .events { max-height: 300px; overflow: auto; }
+  .ev { display: grid; grid-template-columns: 70px 1fr; gap: 10px; padding: 5px 0; border-top: 1px solid var(--line); }
+  .ev:first-child { border-top: 0; }
+  .ev time { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .ev.action .msg { font-weight: 650; }
+  .ev.warn .msg { color: var(--warn); }
+  .ev.error .msg { color: var(--bad); }
+  .muted { color: var(--muted); }
+  .err-banner { display: none; margin-bottom: 12px; padding: 10px 12px; border-radius: 10px; background: var(--bad-soft); color: var(--bad); font-weight: 600; }
+  @media (max-width: 1100px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .topo, .lower, .charts { grid-template-columns: 1fr; } }
+  @media (max-width: 560px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpi .value { font-size: 20px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">Spillway<small>하이브리드 버스팅 · 대피 관제</small></div>
+    <span id="mode" class="mode m-NORMAL"><span class="dot"></span><span id="mode-text">연결 중</span></span>
+    <span id="reason" class="reason"></span>
+    <span class="muted">사용자 접속 주소 <span id="public-url" class="url"></span></span>
+  </header>
+  <div id="err-banner" class="err-banner"></div>
+
+  <section class="grid kpis">
+    <div class="panel kpi"><div class="label">사용자 체감 응답 p95</div><div class="value" id="k-p95">–</div><div class="sub" id="k-p95-sub"></div></div>
+    <div class="panel kpi"><div class="label">처리량</div><div class="value" id="k-rps">–</div><div class="sub" id="k-rps-sub"></div></div>
+    <div class="panel kpi"><div class="label">트래픽 분담 (로컬 / 클라우드)</div><div class="value" id="k-share">–</div><div class="sub" id="k-share-sub"></div></div>
+    <div class="panel kpi"><div class="label">클라우드 인스턴스</div><div class="value" id="k-inst">–</div><div class="sub" id="k-inst-sub"></div></div>
+    <div class="panel kpi"><div class="label">데이터 보호</div><div class="value" id="k-prot">–</div><div class="sub" id="k-prot-sub"></div></div>
+    <div class="panel kpi"><div class="label">버스트 누적 비용 (추정)</div><div class="value" id="k-cost">–</div><div class="sub" id="k-cost-sub"></div></div>
+  </section>
+
+  <section class="grid topo">
+    <div class="panel">
+      <h2>로컬 사이트 · 온프레미스</h2>
+      <h3><span class="sdot" id="l-dot"></span><span id="l-title">로컬</span></h3>
+      <div id="l-rows"></div>
+    </div>
+    <div class="panel">
+      <h2>엣지 · 고정 URL</h2>
+      <h3><span class="sdot" id="e-dot"></span><span id="e-title">엣지</span></h3>
+      <div class="share"><div class="l" id="e-share-l" style="width:100%"></div><div class="c" id="e-share-c" style="width:0%"></div></div>
+      <div class="legend"><span id="e-share-lt">로컬 100%</span><span id="e-share-ct">클라우드 0%</span></div>
+      <div id="e-rows" style="margin-top:6px"></div>
+      <div class="held" id="e-held" hidden></div>
+    </div>
+    <div class="panel">
+      <h2>클라우드 사이트</h2>
+      <h3><span class="sdot" id="c-dot"></span><span id="c-title">클라우드</span></h3>
+      <div id="c-rows"></div>
+    </div>
+  </section>
+
+  <section class="grid charts">
+    <div class="panel"><h2>응답 시간 p95 (ms) — 검정: 사용자 체감 · 파랑: 백엔드 처리 · 점선: 버스트/복귀 임계치</h2><canvas id="ch-lat"></canvas></div>
+    <div class="panel"><h2>처리량 (rps) — 검정: rps · 파랑 영역: 클라우드 인스턴스 · 초록 점선: 로컬 분담률</h2><canvas id="ch-rps"></canvas></div>
+  </section>
+
+  <section class="grid lower">
+    <div class="panel">
+      <h2>사용자 체감 · 프로브 (0.2초마다 쓰기)</h2>
+      <div class="probe-grid">
+        <div class="cell"><div class="label">최근 무응답 구간 (RTO)</div><div class="big" id="p-rto">–</div></div>
+        <div class="cell"><div class="label">확인된 유실 쓰기</div><div class="big" id="p-lost">–</div></div>
+      </div>
+      <div id="p-rows"></div>
+    </div>
+    <div class="panel">
+      <h2 id="op-head">최근 작업</h2>
+      <h3 id="op-title" class="muted">아직 대피·페일백 기록이 없어요</h3>
+      <ul class="steps" id="op-steps"></ul>
+    </div>
+    <div class="panel">
+      <h2>조작</h2>
+      <div class="ctl">
+        <div class="group">
+          <div class="t">부하 테스트</div>
+          <div class="btns" style="align-items:center">
+            <label class="inline">rps <input type="number" id="load-rps" value="120" min="1" max="5000"></label>
+            <label class="inline">초 <input type="number" id="load-sec" value="60" min="5" max="600"></label>
+            <button class="primary" id="btn-load">부하 시작</button>
+            <button id="btn-load-stop">중지</button>
+          </div>
+          <div class="muted" id="load-info" style="margin-top:6px"></div>
+        </div>
+        <div class="group">
+          <div class="t">버스트</div>
+          <div class="btns"><button id="btn-burst-on">수동 버스트</button><button id="btn-burst-off">버스트 종료</button></div>
+        </div>
+        <div class="group">
+          <div class="t">사이트 이동</div>
+          <div class="btns">
+            <button class="danger" id="btn-migrate">클라우드로 이사 (무손실)</button>
+            <button id="btn-failback">페일백 (로컬 복귀)</button>
+          </div>
+          <div class="muted" style="margin-top:6px">긴급 대피는 로컬이 끊기면 자동으로 실행돼요.</div>
+        </div>
+        <div class="group">
+          <div class="t">설정</div>
+          <div class="btns" style="align-items:center">
+            <label class="inline"><input type="checkbox" id="auto-evac"> 자동 대피</label>
+            <label class="inline"><input type="checkbox" id="sync-rep"> 동기 복제</label>
+            <button id="btn-probe-reset">프로브 초기화</button>
+          </div>
+          <div class="btns" style="margin-top:8px;align-items:center">
+            <label class="inline">토큰 <input type="password" id="token" style="width:140px" placeholder="SPILLWAY_TOKEN"></label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>이벤트 로그</h2>
+    <div class="events" id="events"></div>
+  </section>
+</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const MODE = {
+    NORMAL: "평상", BURST: "버스트", EVACUATING: "대피 중", EVACUATED: "대피 완료 · 클라우드 단독",
+    FAILBACK_SYNC: "페일백 · 동기화", SWITCHING_BACK: "페일백 · 전환 중",
+  };
+  const OP = { evacuate: "긴급 대피", migrate: "계획된 이사", failback: "페일백" };
+  const fmt = (n, d = 0) => (n == null || Number.isNaN(n)) ? "–" : Number(n).toLocaleString("ko-KR", { maximumFractionDigits: d, minimumFractionDigits: d });
+  const bytes = (b) => b == null || b < 0 ? "–" : b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB";
+  const time = (t) => new Date(t).toLocaleTimeString("ko-KR", { hour12: false });
+  const rows = (list) => list.map(([k, v]) => `<div class="row"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`).join("");
+  const pill = (cls, text) => `<span class="pill ${cls}">${esc(text)}</span>`;
+
+  let token = "";
+  try { token = localStorage.getItem("spillway-token") || ""; } catch (_) {}
+  $("token").value = token;
+  $("token").addEventListener("change", () => { token = $("token").value; try { localStorage.setItem("spillway-token", token); } catch (_) {} });
+
+  async function post(path, body) {
+    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Spillway-Token": token }, body: JSON.stringify(body || {}) });
+    if (!res.ok) {
+      const msg = (await res.json().catch(() => ({}))).error || res.statusText;
+      alert("요청 실패: " + msg);
+      return null;
+    }
+    return res.json().catch(() => ({}));
+  }
+
+  function dbPill(site) {
+    if (!site.reachable) return pill("p-bad", "연결 불가");
+    const s = site.status;
+    if (!s) return pill("p-mute", "알 수 없음");
+    if (s.state === "rebuilding" || s.state === "initializing") return pill("p-purple", "재구성 중");
+    if (s.state !== "running") return pill("p-warn", s.state);
+    if (s.role === "primary") return s.fenced ? pill("p-warn", "주 DB · 쓰기 차단(격리)") : pill("p-ok", "주 DB");
+    if (s.role === "standby") return s.streaming ? pill("p-cloud", "대기 복제본 · 스트리밍") : pill("p-warn", "대기 복제본 · 연결 끊김");
+    return pill("p-mute", s.role);
+  }
+  const dotColor = (ok, warn) => ok ? "var(--local)" : warn ? "var(--warn)" : "var(--bad)";
+
+  function render(v) {
+    const ed = v.edge;
+    const st = ed ? ed.stats : null;
+    $("mode").className = "mode m-" + v.mode;
+    $("mode-text").textContent = MODE[v.mode] || v.mode;
+    $("reason").textContent = v.reason || "";
+    $("public-url").textContent = v.settings?.public_url || "";
+    const errs = [v.edge_err && "엣지: " + v.edge_err, v.router_err && "DB 라우터: " + v.router_err, v.probe_err && "프로브: " + v.probe_err].filter(Boolean);
+    $("err-banner").style.display = errs.length ? "block" : "none";
+    $("err-banner").textContent = errs.join(" · ");
+
+    // KPIs
+    const set = v.settings || {};
+    $("k-p95").textContent = st ? fmt(st.p95_ms) + " ms" : "–";
+    $("k-p95-sub").textContent = ed ? `백엔드 p95 ${fmt(ed.upstream.p95_ms)}ms (버스트 기준 ${fmt(set.p95_high_ms)}ms)` : "";
+    $("k-rps").textContent = st ? fmt(st.rps, 1) + " rps" : "–";
+    $("k-rps-sub").textContent = st ? `오류율 ${fmt(st.error_rate * 100, 1)}%` : "";
+    const gl = ed?.groups?.local?.count || 0, gc = ed?.groups?.cloud?.count || 0;
+    const lp = gl + gc ? Math.round(gl / (gl + gc) * 100) : 100;
+    $("k-share").textContent = `${lp} / ${100 - lp}`;
+    $("k-share-sub").textContent = "최근 10초 요청 기준 (%)";
+    const inst = (v.providers || []).reduce((a, p) => a + (p.ready || 0), 0);
+    const desired = (v.providers || []).reduce((a, p) => a + (p.desired || 0), 0);
+    $("k-inst").textContent = `${inst}`;
+    $("k-inst-sub").textContent = `목표 ${desired} · 최대 ${fmt(set.burst_max)}${set.warm_min ? " · 예열 " + set.warm_min : ""} · ${set.providers || ""}`;
+    const prot = v.protection || {};
+    $("k-prot").innerHTML = prot.state === "ok" ? `<span style="color:var(--local)">정상</span>` : prot.state === "degraded" ? `<span style="color:var(--warn)">저하</span>` : `<span style="color:var(--bad)">없음</span>`;
+    $("k-prot-sub").textContent = prot.detail + (prot.lag_bytes >= 0 ? ` · 지연 ${bytes(prot.lag_bytes)}` : "");
+    $("k-cost").textContent = "₩" + fmt(v.cost_krw, 1);
+    $("k-cost-sub").textContent = `인스턴스 ${fmt(v.instance_seconds)}초 · 대기 복제본 ₩${fmt(set.standby_cost_per_hour_krw)}/시간`;
+
+    // Local site
+    const localB = ed?.backends?.find((b) => b.name === "local");
+    const ls = v.local, lst = ls.status || {};
+    $("l-dot").style.background = dotColor(ls.reachable && ls.app_healthy, ls.reachable);
+    $("l-title").textContent = lst.site ? `사이트 "${lst.site}"` : "로컬";
+    $("l-rows").innerHTML = rows([
+      ["웹 앱", !ls.app_enabled ? pill("p-warn", "격리됨 (라우팅 제외)") : ls.app_healthy ? pill("p-ok", "정상") : pill("p-bad", "응답 없음")],
+      ["데이터베이스", dbPill(ls)],
+      ["DB 에이전트", ls.reachable ? pill("p-ok", "연결됨") : pill("p-bad", "연결 불가")],
+      ["WAL 위치", esc(lst.lsn || "–")],
+      ["처리 비중", localB ? `${localB.units} 단위` : "–"],
+      ["측정된 처리 한계", v.local_capacity_rps ? fmt(v.local_capacity_rps, 0) + " rps (포화 시 실측)" : "–"],
+      ["처리 중 요청", localB ? fmt(localB.inflight) : "–"],
+    ]);
+
+    // Edge
+    $("e-dot").style.background = dotColor(!!ed && !ed.paused, !!ed);
+    $("e-title").textContent = ed ? (ed.paused ? "전환 중 — 요청 대기" : "정상 분배 중") : "연결 불가";
+    $("e-share-l").style.width = lp + "%";
+    $("e-share-c").style.width = (100 - lp) + "%";
+    $("e-share-lt").textContent = `로컬 ${lp}%`;
+    $("e-share-ct").textContent = `클라우드 ${100 - lp}%`;
+    const backends = (ed?.backends || []).map((b) => [b.name, `${b.healthy ? pill(b.group === "local" ? "p-ok" : "p-cloud", "정상") : pill("p-bad", "비정상")} ${b.enabled ? "" : pill("p-warn", "제외")} 비중 ${b.units} · 처리 ${fmt(b.served)}`]);
+    $("e-rows").innerHTML = rows([["p50 / p99", st ? `${fmt(st.p50_ms)} / ${fmt(st.p99_ms)} ms` : "–"], ...backends]);
+    $("e-held").hidden = !(ed && (ed.paused || ed.held > 0));
+    $("e-held").textContent = ed ? `사용자 요청 ${ed.held}건을 에러 대신 붙잡고 있어요 (전환이 끝나면 전달)` : "";
+
+    // Cloud site
+    const cs = v.cloud, cst = cs.status || {};
+    $("c-dot").style.background = dotColor(cs.reachable, true);
+    $("c-title").textContent = cst.site ? `사이트 "${cst.site}"` : "클라우드";
+    const rep = (v.local.status?.replicas || []).find((r) => r.name === cst.site);
+    const provRows = (v.providers || []).map((p) => [p.provider, `${p.ready}/${p.desired} 준비${p.err ? " " + pill("p-bad", "오류") : ""}`]);
+    $("c-rows").innerHTML = rows([
+      ["데이터베이스", dbPill(cs)],
+      ["복제 지연", rep ? bytes(rep.lag_bytes) + (rep.sync === "sync" ? " (동기)" : " (비동기)") : "–"],
+      ["DB 라우터 대상", v.router ? esc(v.router.target) + (v.router.paused ? " " + pill("p-warn", "일시정지") : "") : "–"],
+      ["DB 라우터 연결", v.router ? `${v.router.active}개 · 전환 ${v.router.switches}회` : "–"],
+      ...provRows,
+    ]);
+
+    // Probe
+    const p = v.probe;
+    if (p) {
+      const o = p.last_outage;
+      $("p-rto").textContent = o ? fmt(o.seconds, 2) + "초" : "0초";
+      $("p-lost").innerHTML = p.lost > 0 ? `<span style="color:var(--bad)">${p.lost}건</span>` : `<span style="color:var(--local)">0건</span>`;
+      $("p-rows").innerHTML = rows([
+        ["확인 응답 받은 쓰기", fmt(p.acked)],
+        ["DB에서 재확인", fmt(p.verified) + (p.pending ? ` (확인 대기 ${p.pending})` : "")],
+        ["실패한 시도", fmt(p.failed)],
+        ["현재 쓰기 공백", fmt(p.current_gap_s, 1) + "초"],
+        ["마지막 쓰기 응답", fmt(p.last_write_ms) + " ms · " + esc(p.last_backend || "–")],
+        ["무응답 구간 발생", `${(p.outages || []).length}회`],
+      ]);
+      const L = p.load;
+      $("load-info").textContent = L && (L.running || L.sent) ? `${L.running ? "진행 중" : "종료"} · 보냄 ${fmt(L.sent)} · p95 ${fmt(L.stats.p95_ms)}ms · 실패 ${fmt(L.failed)} · ` +
+        Object.entries(L.by_backend || {}).map(([k, n]) => `${k} ${fmt(n)}`).join(", ") : "";
+    }
+
+    // Operation
+    const op = v.operation;
+    if (op) {
+      $("op-head").textContent = op.running ? "진행 중인 작업" : "최근 작업";
+      const status = op.running ? pill("p-purple", "진행 중") : op.ok ? pill("p-ok", "완료") : pill("p-bad", "실패");
+      const total = op.running ? (Date.now() - new Date(op.started)) / 1000 : op.total_ms / 1000;
+      $("op-title").className = "";
+      $("op-title").innerHTML = `${esc(OP[op.kind] || op.kind)} ${status} <span class="muted" style="font-weight:500">${fmt(total, 1)}초</span>`;
+      $("op-steps").innerHTML = op.steps.map((s) => `<li><span>${s.ok ? "✓" : "✕"}</span><span>${esc(s.name)}</span><span class="ms">${fmt(s.ms)} ms</span>${s.detail ? `<span class="detail">${esc(s.detail)}</span>` : ""}</li>`).join("") +
+        (op.running ? `<li><span class="muted">…</span><span class="muted">다음 단계 진행 중</span><span></span></li>` : "");
+    }
+
+    // Controls state
+    $("auto-evac").checked = v.auto_evacuate;
+    $("sync-rep").checked = !!(v.local.status?.role === "primary" ? v.local.status.sync_mode : v.cloud.status?.sync_mode);
+    const busy = ["EVACUATING", "FAILBACK_SYNC", "SWITCHING_BACK"].includes(v.mode);
+    $("btn-migrate").disabled = busy || !(v.mode === "NORMAL" || v.mode === "BURST");
+    $("btn-failback").disabled = busy || v.mode !== "EVACUATED" || !v.local_returned;
+    $("btn-burst-on").disabled = v.mode !== "NORMAL";
+    $("btn-burst-off").disabled = v.mode !== "BURST";
+
+    // Events
+    $("events").innerHTML = (v.events || []).slice(-80).reverse().map((e) => `<div class="ev ${e.kind}"><time>${time(e.at)}</time><span class="msg">${esc(e.msg)}</span></div>`).join("");
+
+    drawCharts(v);
+  }
+
+  function setupCanvas(cv) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    return { ctx, w, h };
+  }
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  function axes(ctx, w, h, pad, maxY, unit) {
+    ctx.strokeStyle = css("--grid"); ctx.fillStyle = css("--muted"); ctx.lineWidth = 1; ctx.font = "11px system-ui";
+    for (let i = 0; i <= 4; i++) {
+      const y = pad.t + (h - pad.t - pad.b) * i / 4;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+      ctx.fillText(fmt(maxY * (1 - i / 4)) + unit, 2, y + 4);
+    }
+  }
+  function line(ctx, pts, color, width = 2, dash) {
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash || []);
+    ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  function drawCharts(v) {
+    const hist = v.history || [];
+    const set = v.settings || {};
+    const pad = { l: 46, r: 10, t: 8, b: 16 };
+    const n = 180;
+    const data = hist.slice(-n);
+    const xAt = (i, w) => pad.l + (w - pad.l - pad.r) * (i + (n - data.length)) / (n - 1);
+
+    { // latency
+      const { ctx, w, h } = setupCanvas($("ch-lat"));
+      // Cap the axis so a multi-second hold during a failover does not flatten
+      // everything else; clipped values are drawn at the top edge.
+      const peak = Math.max(...data.map((d) => Math.max(d.p95, d.up_p95 || 0)), 0);
+      const maxY = Math.min(Math.max(set.p95_high_ms * 1.6 || 100, peak * 1.1), Math.max(set.p95_high_ms * 8, 2000));
+      axes(ctx, w, h, pad, maxY, "");
+      const yAt = (val) => pad.t + (h - pad.t - pad.b) * (1 - Math.min(val, maxY) / maxY);
+      line(ctx, [[pad.l, yAt(set.p95_high_ms)], [w - pad.r, yAt(set.p95_high_ms)]], css("--warn"), 1, [5, 4]);
+      line(ctx, [[pad.l, yAt(set.p95_low_ms)], [w - pad.r, yAt(set.p95_low_ms)]], css("--local"), 1, [2, 4]);
+      if (data.length > 1) {
+        line(ctx, data.map((d, i) => [xAt(i, w), yAt(d.up_p95 || 0)]), css("--cloud"), 1.5);
+        line(ctx, data.map((d, i) => [xAt(i, w), yAt(d.p95)]), css("--text"), 2);
+      }
+    }
+    { // throughput + instances + local share
+      const { ctx, w, h } = setupCanvas($("ch-rps"));
+      const maxY = Math.max(10, ...data.map((d) => d.rps)) * 1.15;
+      axes(ctx, w, h, pad, maxY, "");
+      const yAt = (val) => pad.t + (h - pad.t - pad.b) * (1 - val / maxY);
+      const maxI = Math.max(set.burst_max || 6, ...data.map((d) => d.cloud));
+      const yI = (val) => pad.t + (h - pad.t - pad.b) * (1 - val / maxI);
+      if (data.length > 1) {
+        const step = [];
+        data.forEach((d, i) => { const x = xAt(i, w); if (i) step.push([x, yI(data[i - 1].cloud)]); step.push([x, yI(d.cloud)]); });
+        ctx.fillStyle = css("--cloud-soft");
+        ctx.beginPath(); ctx.moveTo(xAt(0, w), h - pad.b); step.forEach(([x, y]) => ctx.lineTo(x, y)); ctx.lineTo(xAt(data.length - 1, w), h - pad.b); ctx.closePath(); ctx.fill();
+        line(ctx, step, css("--cloud"), 1.5);
+        line(ctx, data.map((d, i) => [xAt(i, w), yAt(d.rps)]), css("--text"), 2);
+        line(ctx, data.map((d, i) => [xAt(i, w), pad.t + (h - pad.t - pad.b) * (1 - d.local_share)]), css("--local"), 1.5, [4, 3]);
+      }
+    }
+  }
+
+  async function tick() {
+    try {
+      const res = await fetch("/api/state", { cache: "no-store" });
+      if (res.ok) render(await res.json());
+    } catch (_) {
+      $("err-banner").style.display = "block";
+      $("err-banner").textContent = "컨트롤 플레인에 연결할 수 없어요";
+    }
+  }
+
+  $("btn-load").onclick = () => post("/api/load", { rps: +$("load-rps").value, seconds: +$("load-sec").value });
+  $("btn-load-stop").onclick = () => post("/api/load/stop");
+  $("btn-burst-on").onclick = () => post("/api/burst/on");
+  $("btn-burst-off").onclick = () => post("/api/burst/off");
+  $("btn-migrate").onclick = () => confirm("로컬에서 클라우드로 계획된 이사를 실행할까요? (쓰기를 잠시 멈추고 데이터 손실 없이 전환)") && post("/api/migrate");
+  $("btn-failback").onclick = () => confirm("로컬 사이트로 페일백할까요? 로컬 DB를 클라우드에서 다시 복제한 뒤 전환합니다.") && post("/api/failback");
+  $("btn-probe-reset").onclick = () => post("/api/probe/reset");
+  $("auto-evac").onchange = (e) => post("/api/auto-evacuate", { enabled: e.target.checked });
+  $("sync-rep").onchange = (e) => post("/api/sync-replication", { on: e.target.checked });
+
+  tick();
+  setInterval(tick, 1000);
+  window.addEventListener("resize", tick);
+})();
+</script>
+</body>
+</html>

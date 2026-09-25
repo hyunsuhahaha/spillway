@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spillway 방명록</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #5d6573; --line: #e3e6eb;
+    --local: #0f9d58; --local-bg: #e6f5ec; --cloud: #1a73e8; --cloud-bg: #e8f0fd; --accent: #16181d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --card: #171a20; --text: #eef0f3; --muted: #9aa3b2; --line: #2a2f38;
+      --local: #34c77b; --local-bg: #133224; --cloud: #6ea8ff; --cloud-bg: #16264a; --accent: #eef0f3; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0; }
+  .badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+    font-weight: 600; font-size: 14px; white-space: nowrap; transition: background .3s, color .3s; }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .badge.local { color: var(--local); background: var(--local-bg); }
+  .badge.cloud { color: var(--cloud); background: var(--cloud-bg); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 16px; }
+  .hint { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+  form { display: grid; gap: 10px; }
+  input, textarea { width: 100%; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  textarea { resize: vertical; min-height: 72px; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 11px 14px;
+    background: var(--accent); color: var(--bg); cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 12px 0; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  .meta { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 13px; }
+  .who { font-weight: 600; color: var(--text); }
+  .msg { margin: 2px 0 0; word-break: break-word; }
+  .site { font-size: 12px; font-weight: 600; }
+  .site.local { color: var(--local); } .site.cloud { color: var(--cloud); }
+  .err { color: #d93025; font-size: 14px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Spillway 방명록</h1>
+    <span id="badge" class="badge {{if .IsLocal}}local{{else}}cloud{{end}}"><span class="dot"></span><span id="badge-text">{{if .IsLocal}}로컬 서버{{else}}클라우드{{end}} · {{.Instance}}</span></span>
+  </header>
+
+  <section class="card">
+    <form id="form" method="post" action="/api/entries">
+      <input id="name" name="name" maxlength="40" placeholder="이름 (선택)" autocomplete="nickname">
+      <textarea id="message" name="message" maxlength="280" placeholder="한 줄 남겨 주세요" required></textarea>
+      <button id="submit" type="submit">남기기</button>
+      <p id="form-err" class="err" hidden></p>
+    </form>
+    <p class="hint">위 배지는 이 요청을 처리한 곳을 보여줘요. 발표 중 트래픽이 노트북과 클라우드 사이를 오가는 걸 볼 수 있어요.</p>
+  </section>
+
+  <section class="card">
+    <div class="row"><strong>최근 메시지</strong><span class="hint" id="total">전체 {{.Total}}건</span></div>
+    {{if .Err}}<p class="err">DB 오류: {{.Err}}</p>{{end}}
+    <ul id="list">
+      {{range .Entries}}
+      <li><div class="meta"><span class="who">{{.Name}}</span><span class="site {{if eq .Site "local"}}local{{else}}cloud{{end}}">{{.Site}}에서 기록</span></div><p class="msg">{{.Message}}</p></li>
+      {{else}}<li class="hint">아직 메시지가 없어요.</li>{{end}}
+    </ul>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  try { $("name").value = localStorage.getItem("spillway-name") || ""; } catch (_) {}
+
+  function setBadge(served) {
+    if (!served) return;
+    const local = served.site === "local";
+    $("badge").className = "badge " + (local ? "local" : "cloud");
+    $("badge-text").textContent = (local ? "로컬 서버" : "클라우드") + " · " + served.instance;
+  }
+
+  async function refresh() {
+    try {
+      const res = await fetch("/api/entries", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      setBadge(data.served_by);
+      $("total").textContent = "전체 " + data.total + "건";
+      $("list").innerHTML = data.entries.length ? data.entries.map((e) => {
+        const cls = e.site === "local" ? "local" : "cloud";
+        return `<li><div class="meta"><span class="who">${esc(e.name)}</span><span class="site ${cls}">${esc(e.site)}에서 기록</span></div><p class="msg">${esc(e.message)}</p></li>`;
+      }).join("") : '<li class="hint">아직 메시지가 없어요.</li>';
+    } catch (_) { /* the edge holds requests during a switch; just retry next tick */ }
+  }
+
+  $("form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const name = $("name").value.trim();
+    const message = $("message").value.trim();
+    if (!message) return;
+    try { localStorage.setItem("spillway-name", name); } catch (_) {}
+    $("submit").disabled = true;
+    $("form-err").hidden = true;
+    try {
+      const res = await fetch("/api/entries", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, message }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+      setBadge((await res.json()).served_by);
+      $("message").value = "";
+      refresh();
+    } catch (err) {
+      $("form-err").textContent = "저장하지 못했어요: " + err.message;
+      $("form-err").hidden = false;
+    } finally {
+      $("submit").disabled = false;
+    }
+  });
+
+  setInterval(refresh, 2000);
+})();
+</script>
+</body>
+</html>

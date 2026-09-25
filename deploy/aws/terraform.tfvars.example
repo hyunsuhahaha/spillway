@@ -1,0 +1,4 @@
+region            = "ap-northeast-2"
+app_db_password   = "change-me-app"   # same as APP_DB_PASSWORD in deploy/*/.env
+cloud_ts_ip       = "100.64.0.2"      # Tailscale IP of the GCP anchor VM
+tailscale_authkey = "tskey-auth-xxxx" # reusable + ephemeral key

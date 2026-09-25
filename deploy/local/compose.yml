@@ -1,0 +1,62 @@
+# Spillway — local site (your laptop / office server).
+#
+# Every service shares the network namespace of the Tailscale container, so
+# the site is reachable on the tailnet at the laptop's Tailscale IP:
+#   :8080 web app   :5432 Postgres (primary)   :7000 DB agent
+# Nothing is published on the LAN or the internet; the public entry point is
+# the edge on the cloud anchor VM.
+#
+#   cp .env.example .env   # fill in TS_AUTHKEY and secrets
+#   docker compose up -d --build
+name: spillway-local
+
+services:
+  tailscale:
+    image: tailscale/tailscale:stable
+    hostname: spillway-local
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      TS_HOSTNAME: spillway-local
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_ACCEPT_DNS: "false"
+    volumes: [ts-state:/var/lib/tailscale]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    cap_add: [NET_ADMIN, NET_RAW]
+    restart: unless-stopped
+
+  local-db:
+    build: { context: ../.., target: pg }
+    image: spillway-pg:latest
+    init: true
+    network_mode: service:tailscale
+    depends_on: [tailscale]
+    environment:
+      SITE: local
+      ROLE_INIT: primary
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN:?set SPILLWAY_TOKEN in .env}
+      REPL_PASSWORD: ${REPL_PASSWORD:?set REPL_PASSWORD in .env}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
+    volumes: [local-db:/var/lib/postgresql/data]
+    restart: unless-stopped
+
+  local-app:
+    build: { context: ../.., target: app }
+    image: spillway:latest
+    init: true
+    command: ["app"]
+    network_mode: service:tailscale
+    depends_on: [local-db]
+    environment:
+      SITE: local
+      INSTANCE: ${LOCAL_INSTANCE_NAME:-laptop}
+      DB_URL: postgres://spillway:${APP_DB_PASSWORD}@127.0.0.1:5432/spillway?sslmode=disable
+      # Demo capacity of the "small on-prem server". Remove both to use the
+      # machine's real capacity.
+      WORK_MS: ${WORK_MS:-25}
+      MAX_INFLIGHT: ${LOCAL_MAX_INFLIGHT:-3}
+    restart: unless-stopped
+
+volumes:
+  ts-state: {}
+  local-db: {}
