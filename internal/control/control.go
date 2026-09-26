@@ -406,6 +406,23 @@ func (c *Controller) observe(ctx context.Context) {
 		}(i, p)
 	}
 	wg.Wait()
+	// Edge and local-agent requests start together. If the local request times
+	// out, the edge response may be up to that timeout old: its health checker
+	// can mark the app down while we are still waiting for the agent. Refresh
+	// that edge signal now instead of spending another whole observation cycle
+	// on a stale "healthy" snapshot. A failed refresh is treated as unknown.
+	if !skipLocal && localErr != nil && edgeErr == nil {
+		for _, b := range edgeSt.Backends {
+			if b.Name == "local" && b.Healthy {
+				var fresh edge.StateView
+				edgeErr = c.obs.Do(ctx, "GET", c.cfg.EdgeAdmin+"/state", nil, &fresh)
+				if edgeErr == nil {
+					edgeSt = fresh
+				}
+				break
+			}
+		}
+	}
 
 	now := time.Now()
 	c.edgeState = nil

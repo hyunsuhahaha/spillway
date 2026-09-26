@@ -12,6 +12,7 @@ import (
 
 	"spillway/internal/cloud"
 	"spillway/internal/edge"
+	"spillway/internal/httpx"
 	"spillway/internal/metrics"
 	"spillway/internal/siteagent"
 )
@@ -461,6 +462,38 @@ func TestEmergencyReadinessObservationSkipsDeadLocalAgent(t *testing.T) {
 	defer mu.Unlock()
 	if localCalls != 0 || c.localSt != nil {
 		t.Fatalf("unreachable local site was polled: calls=%d state=%+v", localCalls, c.localSt)
+	}
+}
+
+func TestObservationRefreshesEdgeAfterLocalAgentTimeout(t *testing.T) {
+	var mu sync.Mutex
+	edgeReads := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/edge/state":
+			mu.Lock()
+			edgeReads++
+			read := edgeReads
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(edge.StateView{Backends: []edge.BackendView{{BackendSpec: edge.BackendSpec{Name: "local", Group: "local"}, Healthy: read == 1}}})
+		case "/local/status":
+			time.Sleep(100 * time.Millisecond)
+		default:
+			_, _ = w.Write([]byte("{}"))
+		}
+	}))
+	defer srv.Close()
+	c := testController()
+	c.obs = httpx.NewClient(40*time.Millisecond, "")
+	c.cfg.EdgeAdmin = srv.URL + "/edge"
+	c.cfg.DBRouterAdmin = srv.URL + "/router"
+	c.cfg.LocalAgent = srv.URL + "/local"
+	c.cfg.CloudAgent = srv.URL + "/cloud"
+	c.cfg.ProbeURL = srv.URL + "/probe"
+	c.observe(t.Context())
+	if edgeReads != 2 || c.localSt != nil || c.localAppHealthy() {
+		t.Fatalf("stale edge state after timeout: edgeReads=%d local=%+v healthy=%t", edgeReads, c.localSt, c.localAppHealthy())
 	}
 }
 
