@@ -8,6 +8,22 @@
 
 SoftBank Hackathon 2026 (테마: *One Action, Infinite Clouds*) 예선 제출물.
 
+## 한 번의 배포 동작 (제출 데모 입구)
+
+로컬에서 만든 Dockerfile 기반 웹앱을 한 명령으로 배포한다. 기본 예제는 [`examples/hello`](examples/hello)이며, 다른 **상태 없는 HTTP 앱**도 `--source`로 지정할 수 있다. 새 버전을 후보 컨테이너에서 먼저 헬스체크하고, 로컬 배포 실패 시 이전 이미지로 되돌린다.
+
+```bash
+python scripts/deploy_webapp.py --target local
+# http://127.0.0.1:18081
+
+# GCP 프로젝트·Artifact Registry·결제 설정을 준비한 경우에만:
+python scripts/deploy_webapp.py --target cloudrun --project YOUR_PROJECT --public
+```
+
+`--target both`는 동일 소스를 Cloud Run과 로컬에 순서대로 배포하지만 두 환경 간 원자적 전환은 아니다. Cloud Run 경로는 명령·응답을 모의 테스트했으나 **실제 GCP 프로젝트가 없어 실배포하지 못했다**. 상세 조건과 정리 방법: [웹앱 배포](docs/deploy-webapp.md).
+
+이 배포 경로와 아래의 하이브리드 버스팅·DB 대피 런타임은 구분된다. 현재 버스팅·DB 대피는 **내장 방명록 앱**에 대해 검증했으며, 임의의 `--source` 앱까지 자동으로 DB 복제·대피시키는 기능으로 주장하지 않는다.
+
 ---
 
 ## 무엇이 되나
@@ -151,7 +167,7 @@ deploy/aws     Terraform: ALB + ECS Fargate(Tailscale 사이드카), ECR, 제한
 
 ## API
 
-컨트롤 플레인 (`:8090`, 변경 요청은 `X-Spillway-Token` 헤더):
+컨트롤 플레인 (`:8090`, 변경 요청은 `X-Spillway-Token` 헤더; 실제 클라우드에서는 tailnet 전용):
 
 | 메서드 | 경로 | 동작 |
 |---|---|---|

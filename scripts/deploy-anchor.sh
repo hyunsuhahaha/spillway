@@ -21,4 +21,5 @@ gcloud compute ssh "$vm" --project "$project" --zone "$zone" --command "
   sudo gcloud auth configure-docker \${region:-asia-northeast3}-docker.pkg.dev --quiet >/dev/null 2>&1 || true
   cd /opt/spillway && sudo docker compose pull && sudo docker compose up -d && sudo docker compose ps"
 echo
-echo "dashboard: http://$(gcloud compute addresses describe spillway-anchor --project "$project" --region "${zone%-*}" --format='value(address)'):8090"
+cloud_ts_ip=$(sed -n 's/^CLOUD_TS_IP=//p' deploy/cloud/.env | tail -n 1)
+echo "dashboard (tailnet only): http://${cloud_ts_ip:-<CLOUD_TS_IP>}:8090"

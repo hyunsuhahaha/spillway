@@ -93,7 +93,7 @@ resource "google_compute_firewall" "public" {
   target_tags   = ["spillway-anchor"]
   allow {
     protocol = "tcp"
-    ports    = ["80", "8090"]
+    ports    = ["80"]
   }
 }
 

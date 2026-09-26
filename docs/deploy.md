@@ -10,7 +10,8 @@
    ┌───────────── GCP (asia-northeast3) ─────────────┐        ┌──── 노트북 (로컬 사이트) ────┐
    │ 앵커 VM  e2-small                                │        │ tailscale                   │
    │  tailscale ◀══════════ tailnet ══════════════════╪════════▶  local-app  :8080           │
-   │  edge :80 · control :8090 · dbrouter :6432       │        │  local-db   :5432 (주 DB)    │
+   │  edge :80 · control :8090 (tailnet 전용)          │        │  local-db   :5432 (주 DB)    │
+   │  dbrouter :6432 (VPC 내부)                       │        │                             │
    │  cloud-db (대기 복제본) · probe                   │        │  siteagent  :7000           │
    │                                                  │        └─────────────────────────────┘
    │ Cloud Run  spillway-app  (0→N, Direct VPC egress ─▶ dbrouter :6432)
@@ -55,7 +56,7 @@ terraform output cloud_env    # deploy/cloud/.env에 붙여넣을 값
 ```
 
 만들어지는 것:
-- 앵커 VM (Docker 설치 스크립트 포함), 고정 공인 IP, 방화벽 80/8090 공개, 6432는 VPC 내부만
+- 앵커 VM (Docker 설치 스크립트 포함), 고정 공인 IP, 방화벽은 앱 진입점 80만 공개. 관리 화면 8090은 호스트에 포트를 게시하지 않고 tailnet IP에서만 접속, 6432는 VPC 내부만 허용
 - Cloud Run `spillway-app`: 최소 0, 최대 10, Direct VPC egress로 앵커 VM의 dbrouter에 접속
 - 서비스 계정 두 개: Cloud Run 실행용, 앵커 VM용(`run.developer` — 컨트롤 플레인이 최소 인스턴스를 바꿈)
 - Cloud Monitoring API와 앵커 VM의 `monitoring.viewer`: 대시보드의 Cloud Run 실제 인스턴스 관측값에 사용. 지표는 최대 수분 늦으므로 라우팅 준비 판단에는 쓰지 않는다. 지표가 없으면 `–`로 표시하고 0으로 간주하지 않는다.
@@ -74,7 +75,7 @@ gcloud compute ssh spillway-anchor --zone asia-northeast3-a --command "sudo dock
 ./scripts/deploy-anchor.sh <project>
 ```
 
-대시보드 `http://<공인 IP>:8090`에서 **데이터 보호: 정상**(클라우드 복제본 스트리밍)이면 준비 완료다.
+Tailscale에 연결된 운영자 기기에서 `http://<CLOUD_TS_IP>:8090` 대시보드를 열어 **데이터 보호: 정상**(클라우드 복제본 스트리밍)이면 준비 완료다. `SPILLWAY_TOKEN`이 비었거나 `.env.example`의 예시값이면 클라우드 제어기가 시작을 거부한다. 이전 버전의 공개 HTTP 대시보드를 썼다면 토큰을 새로 발급하고 해당 브라우저의 사이트 데이터를 지운다.
 
 ## 4. (선택) AWS Fargate를 두 번째 버스트 대상으로
 
@@ -95,7 +96,11 @@ Fargate 작업은 Tailscale 사이드카(userspace, SOCKS5 `localhost:1055`)로 
 
 ```bash
 curl http://<공인 IP>/api/whoami          # {"site":"local",...}
-curl http://<공인 IP>:8090/api/state | head
+CLOUD_TS_IP=100.64.0.2  # 실제 앵커 VM의 Tailscale IP로 바꿀 것
+curl "http://${CLOUD_TS_IP}:8090/api/state" | head   # tailnet에 연결된 기기에서만
+# 공인 IP의 :8090은 접속이 실패해야 한다.
+# 인증 없는 POST는 실제 동작이 없는 경로에서도 401이어야 한다:
+curl -o /dev/null -w '%{http_code}\n' -X POST "http://${CLOUD_TS_IP}:8090/api/__auth-check"
 ```
 
 대시보드의 부하 테스트로 버스트를 확인한다. 로컬 노트북의 네트워크를 끊으면 대피가 일어나야 한다.
@@ -116,5 +121,6 @@ curl http://<공인 IP>:8090/api/state | head
 | 대시보드에 `cloudrun: metadata token` 오류 | VM 서비스 계정 스코프(cloud-platform), `roles/run.developer` 부여 여부 |
 | Cloud Run 스케일 실패 400 | 어댑터가 서비스 수준 → 리비전 템플릿으로 자동 대체한다. 계속 실패하면 `iam.serviceAccountUser` 확인 |
 | Cloud Run 인스턴스가 비정상 | Cloud Run 로그에서 DB 접속 오류 확인 → 방화벽 `spillway-dbrouter-vpc`, VPC egress 설정 |
+| 페일백 중 `SWITCHING_BACK` 상태에서 멈춤 | 승격 후 응답 유실·라우터 전환 실패 등으로 DB 역할이 불확실해 요청을 자동 재개하지 않은 상태다. 양쪽 siteagent의 `/status`에서 `role`·`fenced`를 확인하고, 유일한 쓰기 가능 DB와 dbrouter 대상을 확정하기 전에는 `/resume`이나 `/promote`를 수동 호출하지 않는다. |
 | Fargate 작업이 DB에 못 붙음 | CloudWatch `/ecs/spillway` tailscale 스트림, 에페메럴 키 유효 기간 |
 | 로컬 Docker Desktop에서 tailscale 실패 | `/dev/net/tun` 사용 불가 시 `TS_USERSPACE=true`로 바꾸면 인바운드는 동작하지만, 페일백(로컬 → 클라우드 DB 복제)에는 커널 모드가 필요하다 |

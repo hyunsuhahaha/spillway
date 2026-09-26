@@ -2,6 +2,11 @@ package control
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +22,239 @@ func testController() *Controller {
 		AppDownAfter: 3 * time.Second, BurstMin: 2, BurstMax: 6, EvacMin: 2})
 	c.provSt = []cloud.Status{{Provider: "sim", Endpoints: []cloud.Endpoint{{Name: "b0", URL: "http://b0:8080", Units: 1}, {Name: "b1", URL: "http://b1:8080", Units: 1}}}}
 	return c
+}
+
+func TestCloudProviderRequiresControlToken(t *testing.T) {
+	t.Setenv("CLOUD_PROVIDERS", "cloudrun")
+	t.Setenv("GCP_PROJECT", "test-project")
+	for _, token := range []string{"", "   ", "change-me-long-random-token", " change-me-long-random-token "} {
+		t.Setenv("SPILLWAY_TOKEN", token)
+		if _, err := ConfigFromEnv(); err == nil {
+			t.Fatalf("cloud provider accepted unsafe token %q", token)
+		}
+	}
+	t.Setenv("SPILLWAY_TOKEN", "test-only-unique-secret-123456")
+	if _, err := ConfigFromEnv(); err != nil {
+		t.Fatalf("cloud provider rejected configured token: %v", err)
+	}
+	t.Setenv("CLOUD_PROVIDERS", "docker")
+	t.Setenv("SPILLWAY_TOKEN", "")
+	if _, err := ConfigFromEnv(); err != nil {
+		t.Fatalf("local simulation should remain usable without a token: %v", err)
+	}
+}
+
+func TestControlRejectsUnauthenticatedMutation(t *testing.T) {
+	c := testController()
+	c.cfg.Token = "test-only-secret"
+	req := httptest.NewRequest(http.MethodPost, "/api/__auth-check", nil)
+	rec := httptest.NewRecorder()
+	c.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated POST returned %d, want 401", rec.Code)
+	}
+	req.Header.Set("X-Spillway-Token", c.cfg.Token)
+	rec = httptest.NewRecorder()
+	c.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("authenticated POST should reach router, got %d", rec.Code)
+	}
+}
+
+func TestDashboardDoesNotPersistControlToken(t *testing.T) {
+	if strings.Contains(string(dashboardHTML), "localStorage.setItem") || strings.Contains(string(dashboardHTML), "localStorage.getItem") {
+		t.Fatal("dashboard must not persist or reload the control token")
+	}
+}
+
+// The mock models the two database roles, not just HTTP responses: a failed
+// response to promote can still mean PostgreSQL was already promoted.
+func TestFailbackCutoverFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name, failAt, wantMode string
+		wantCloudFenced        bool
+		wantLocalRole          string
+		wantResumed            bool
+	}{
+		{"success", "", string(ModeNormal), false, "primary", true},
+		{"edge pause response lost", "edge-pause", string(ModeEvacuated), false, "standby", true},
+		{"router pause response lost", "router-pause", string(ModeEvacuated), false, "standby", true},
+		{"router kill fails", "router-kill", string(ModeEvacuated), false, "standby", true},
+		{"fence response lost", "cloud-fence", string(ModeEvacuated), false, "standby", true},
+		{"promote response lost", "local-promote", string(ModeSwitchingBack), true, "primary", false},
+		{"router target fails", "router-target", string(ModeSwitchingBack), true, "primary", false},
+		{"router target mismatch", "router-target-mismatch", string(ModeSwitchingBack), true, "primary", false},
+		{"router resume response lost", "router-resume", string(ModeSwitchingBack), true, "primary", false},
+		{"edge routes fail", "edge-backends", string(ModeSwitchingBack), true, "primary", false},
+		{"edge resume response lost", "edge-resume", string(ModeSwitchingBack), true, "primary", false},
+		{"reprotect fails", "cloud-rebuild", string(ModeNormal), true, "primary", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			localRole, cloudRole, cloudFenced := "standby", "primary", false
+			edgePaused, routerPaused, routerTarget := false, false, "cloud:5432"
+			var calls []string
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				if r.Method != http.MethodGet {
+					calls = append(calls, r.Method+" "+r.URL.Path)
+				}
+				write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
+				switch r.URL.Path {
+				case "/local/status":
+					write(siteagent.Status{Site: "local", State: "running", Running: true, Role: localRole, Streaming: localRole == "standby", LSNBytes: 100})
+				case "/cloud/status":
+					write(siteagent.Status{Site: "cloud", State: "running", Running: true, Role: cloudRole, Fenced: cloudFenced, LSNBytes: 100,
+						Replicas: []siteagent.Replica{{Name: "local", LagBytes: 0}}})
+				case "/edge/state":
+					write(edge.StateView{Paused: edgePaused, Backends: []edge.BackendView{{BackendSpec: edge.BackendSpec{Name: "local", Group: "local"}, Healthy: true}}})
+				case "/router/status":
+					write(map[string]any{"paused": routerPaused, "target": routerTarget})
+				case "/probe/status":
+					write(map[string]any{})
+				case "/local/rebuild":
+					write(map[string]any{})
+				case "/edge/backends":
+					if tc.failAt == "edge-backends" {
+						http.Error(w, "routes failed", http.StatusInternalServerError)
+						return
+					}
+					write(map[string]any{})
+				case "/router/kill":
+					if tc.failAt == "router-kill" {
+						http.Error(w, "kill failed", http.StatusInternalServerError)
+						return
+					}
+					write(map[string]any{})
+				case "/router/target":
+					var body struct {
+						Addr string `json:"addr"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					if tc.failAt != "router-target-mismatch" {
+						routerTarget = body.Addr
+					}
+					if tc.failAt == "router-target" {
+						http.Error(w, "response lost after target", http.StatusInternalServerError)
+						return
+					}
+					write(map[string]any{})
+				case "/cloud/fence":
+					var body struct {
+						On bool `json:"on"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					cloudFenced = body.On
+					if tc.failAt == "cloud-fence" && body.On {
+						http.Error(w, "response lost after fence", http.StatusInternalServerError)
+						return
+					}
+					write(map[string]any{})
+				case "/local/promote":
+					localRole = "primary"
+					if tc.failAt == "local-promote" {
+						http.Error(w, "response lost after promote", http.StatusInternalServerError)
+						return
+					}
+					write(map[string]any{})
+				case "/cloud/rebuild":
+					if tc.failAt == "cloud-rebuild" {
+						http.Error(w, "rebuild failed", http.StatusInternalServerError)
+						return
+					}
+					cloudRole, cloudFenced = "standby", false
+					write(map[string]any{})
+				case "/edge/pause":
+					edgePaused = true
+					if tc.failAt == "edge-pause" {
+						http.Error(w, "response lost after pause", http.StatusInternalServerError)
+						return
+					}
+					write(map[string]any{})
+				case "/edge/resume":
+					edgePaused = false
+					if tc.failAt == "edge-resume" {
+						http.Error(w, "response lost after resume", http.StatusInternalServerError)
+						return
+					}
+					write(map[string]any{})
+				case "/router/pause":
+					routerPaused = true
+					if tc.failAt == "router-pause" {
+						http.Error(w, "response lost after pause", http.StatusInternalServerError)
+						return
+					}
+					write(map[string]any{})
+				case "/router/resume":
+					routerPaused = false
+					if tc.failAt == "router-resume" {
+						http.Error(w, "response lost after resume", http.StatusInternalServerError)
+						return
+					}
+					write(map[string]any{})
+				default:
+					http.NotFound(w, r)
+				}
+			})
+			srv := httptest.NewServer(h)
+			defer srv.Close()
+			c := testController()
+			c.cfg.EdgeAdmin, c.cfg.DBRouterAdmin = srv.URL+"/edge", srv.URL+"/router"
+			c.cfg.LocalAgent, c.cfg.CloudAgent, c.cfg.ProbeURL = srv.URL+"/local", srv.URL+"/cloud", srv.URL+"/probe"
+			c.cfg.RouterLocalPG, c.cfg.RouterCloudPG = "local:5432", "cloud:5432"
+			c.cfg.CloudPGForLocal, c.cfg.LocalPGForCloud = "cloud:5432", "local:5432"
+			c.mode, c.localEnabled, c.target = ModeEvacuated, false, 2
+			c.localSt = &siteagent.Status{Site: "local", State: "running", Running: true, Role: "primary"}
+			c.failback(context.Background())
+
+			mu.Lock()
+			defer mu.Unlock()
+			if string(c.mode) != tc.wantMode || cloudFenced != tc.wantCloudFenced || localRole != tc.wantLocalRole {
+				t.Fatalf("mode=%s cloudFenced=%t localRole=%s, calls=%v", c.mode, cloudFenced, localRole, calls)
+			}
+			if edgePaused == tc.wantResumed || routerPaused == tc.wantResumed {
+				t.Fatalf("edgePaused=%t routerPaused=%t, want resumed=%t", edgePaused, routerPaused, tc.wantResumed)
+			}
+			fence, promote := -1, -1
+			for i, call := range calls {
+				if call == "POST /cloud/fence" && fence < 0 {
+					fence = i
+				}
+				if call == "POST /local/promote" {
+					promote = i
+				}
+			}
+			if promote >= 0 && (fence < 0 || fence >= promote) {
+				t.Fatalf("old primary must be fenced before new promotion: %v", calls)
+			}
+		})
+	}
+}
+
+func TestReconcileKeepsInterruptedFailbackPaused(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer srv.Close()
+	c := testController()
+	c.cfg.EdgeAdmin, c.cfg.DBRouterAdmin = srv.URL+"/edge", srv.URL+"/router"
+	c.cloudSt = &siteagent.Status{Running: true, Role: "primary", Fenced: true}
+	c.localSt = &siteagent.Status{Running: true, Role: "primary"}
+	c.reconcile(t.Context())
+	if c.mode != ModeSwitchingBack || c.localEnabled {
+		t.Fatalf("interrupted failback resumed as %s, local enabled=%t", c.mode, c.localEnabled)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 || calls[0] != "POST /edge/pause" || calls[1] != "POST /router/pause" {
+		t.Fatalf("restart must hold both entry points, calls=%v", calls)
+	}
 }
 
 func TestDesiredBackendsZeroUnitsWhenNotBursting(t *testing.T) {
@@ -140,6 +378,101 @@ func TestDecideIgnoresLatencyDuringQuietPeriod(t *testing.T) {
 	if c.mode != ModeNormal {
 		t.Fatalf("no burst during the post-switch quiet period, got %s", c.mode)
 	}
+}
+
+func TestSuspectedOutagePrewarmsWithoutRoutingAndCleansUp(t *testing.T) {
+	c := testController()
+	p := &recordingProvider{scales: make(chan int, 4)}
+	c.cfg.Providers = []cloud.Provider{p}
+	c.autoEvac = true
+	c.seenLocal = true
+	c.cloudSt = &siteagent.Status{Running: true}
+	c.edgeState = &edge.StateView{Backends: []edge.BackendView{{BackendSpec: edge.BackendSpec{Name: "local", Group: "local", Enabled: true}, Healthy: false}}}
+
+	c.decide(t.Context())
+	select {
+	case n := <-p.scales:
+		if n != c.cfg.EvacMin {
+			t.Fatalf("prewarm scaled to %d, want %d", n, c.cfg.EvacMin)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("suspected outage did not start prewarming")
+	}
+	if c.mode != ModeNormal || c.target != 0 || !c.localEnabled {
+		t.Fatalf("prewarm changed routing: mode=%s target=%d local=%v", c.mode, c.target, c.localEnabled)
+	}
+	for _, b := range c.desiredBackends() {
+		if b.Group == "cloud" && b.Units != 0 {
+			t.Fatalf("prewarmed cloud received traffic: %+v", b)
+		}
+	}
+
+	// The local site recovers before EVAC_AFTER: no DB promotion or evacuation.
+	c.localSt = &siteagent.Status{Running: true}
+	c.edgeState.Backends[0].Healthy = true
+	deadline := time.Now().Add(time.Second)
+	for len(c.prewarmDone) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	c.decide(t.Context())
+	if c.mode != ModeNormal || c.scaleDownAt.IsZero() {
+		t.Fatalf("recovery should schedule cleanup without evacuation: mode=%s downAt=%v", c.mode, c.scaleDownAt)
+	}
+	c.scaleDownAt = time.Now().Add(-time.Second)
+	c.decide(t.Context())
+	select {
+	case n := <-p.scales:
+		if n != 0 {
+			t.Fatalf("cleanup scaled to %d, want 0", n)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("transient prewarm was not cleaned up")
+	}
+}
+
+func TestEmergencyReadinessObservationSkipsDeadLocalAgent(t *testing.T) {
+	var mu sync.Mutex
+	localCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/local/status" {
+			mu.Lock()
+			localCalls++
+			mu.Unlock()
+			time.Sleep(500 * time.Millisecond)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+	c := testController()
+	c.cfg.EdgeAdmin = srv.URL + "/edge"
+	c.cfg.DBRouterAdmin = srv.URL + "/router"
+	c.cfg.LocalAgent = srv.URL + "/local"
+	c.cfg.CloudAgent = srv.URL + "/cloud"
+	c.cfg.ProbeURL = srv.URL + "/probe"
+	c.mode = ModeEvacuating
+	c.localDownSince = time.Now().Add(-time.Minute)
+	start := time.Now()
+	c.observe(t.Context())
+	if elapsed := time.Since(start); elapsed >= 300*time.Millisecond {
+		t.Fatalf("emergency observation waited on local site: %v", elapsed)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if localCalls != 0 || c.localSt != nil {
+		t.Fatalf("unreachable local site was polled: calls=%d state=%+v", localCalls, c.localSt)
+	}
+}
+
+type recordingProvider struct{ scales chan int }
+
+func (p *recordingProvider) Name() string { return "recording" }
+func (p *recordingProvider) Scale(_ context.Context, n int) error {
+	p.scales <- n
+	return nil
+}
+func (p *recordingProvider) Status(_ context.Context) cloud.Status {
+	return cloud.Status{Provider: p.Name()}
 }
 
 type noopProvider struct{}

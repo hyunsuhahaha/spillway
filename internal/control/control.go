@@ -84,9 +84,18 @@ func ConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	token := strings.TrimSpace(httpx.Env("SPILLWAY_TOKEN", ""))
+	for _, p := range providers {
+		switch p.(type) {
+		case *cloud.CloudRun, *cloud.ECS:
+			if token == "" || token == "change-me-long-random-token" {
+				return Config{}, errors.New("SPILLWAY_TOKEN must be set to a non-placeholder secret for cloud providers")
+			}
+		}
+	}
 	return Config{
 		Listen:        httpx.Env("CONTROL_LISTEN", ":8090"),
-		Token:         httpx.Env("SPILLWAY_TOKEN", ""),
+		Token:         token,
 		PublicURL:     httpx.Env("PUBLIC_URL", "http://localhost:8080"),
 		EventLog:      httpx.Env("EVENT_LOG", ""),
 		EdgeAdmin:     httpx.Env("EDGE_ADMIN_URL", "http://edge:8081"),
@@ -224,6 +233,8 @@ type Controller struct {
 
 	mu   sync.Mutex
 	view View
+	// Provider scaling can also run in the background during evacuation.
+	scaleMu sync.Mutex
 
 	// loop-owned
 	mode           Mode
@@ -241,6 +252,8 @@ type Controller struct {
 	appDownSince   time.Time
 	lastScale      time.Time
 	scaleDownAt    time.Time
+	prewarmDone    chan error
+	prewarmIssued  bool
 	lastEdgeSpec   string
 	lastTick       time.Time
 	warnedNoCloud  bool
@@ -298,7 +311,21 @@ func (c *Controller) providerNames() string {
 // control plane starts, so a restart during an evacuation does not route
 // traffic back to a stale local primary.
 func (c *Controller) reconcile(ctx context.Context) {
-	if c.cloudSt == nil || c.cloudSt.Role != "primary" || c.cloudSt.Fenced {
+	if c.cloudSt == nil || c.cloudSt.Role != "primary" {
+		return
+	}
+	if c.cloudSt.Fenced {
+		// A restart during an interrupted failback must not reset the mode
+		// to NORMAL and open traffic against an unconfirmed DB router target.
+		c.localEnabled = false
+		c.setMode(ModeSwitchingBack, "재시작 시 복원: 클라우드 주 DB가 쓰기 차단됨")
+		if err := c.edgeCall(ctx, "/pause", map[string]string{"reason": "failback-recovery"}); err != nil {
+			c.event("error", "엣지 일시정지 복원 실패: "+err.Error())
+		}
+		if err := c.routerCall(ctx, "POST", "/pause", map[string]bool{"kill": true}); err != nil {
+			c.event("error", "DB 라우터 일시정지 복원 실패: "+err.Error())
+		}
+		c.event("error", "중단된 페일백 감지: DB 역할을 확인하고 수동으로 복구해야 합니다")
 		return
 	}
 	c.localEnabled = false
@@ -356,10 +383,17 @@ func (c *Controller) observe(ctx context.Context) {
 		defer wg.Done()
 		*errp = c.obs.Do(ctx, "GET", url, nil, out)
 	}
-	wg.Add(5)
+	// In emergency evacuation the local site was already confirmed unreachable.
+	// Waiting for that agent's timeout on every cloud-readiness poll only
+	// extends the user-visible outage; its status is not needed for cutover.
+	skipLocal := c.mode == ModeEvacuating && !c.localDownSince.IsZero()
+	wg.Add(4)
 	go get(c.cfg.EdgeAdmin+"/state", &edgeSt, &edgeErr)
 	go get(c.cfg.DBRouterAdmin+"/status", &routerSt, &routerErr)
-	go get(c.cfg.LocalAgent+"/status", &localSt, &localErr)
+	if !skipLocal {
+		wg.Add(1)
+		go get(c.cfg.LocalAgent+"/status", &localSt, &localErr)
+	}
 	go get(c.cfg.CloudAgent+"/status", &cloudSt, &cloudErr)
 	go get(c.cfg.ProbeURL+"/status", &probeSt, &probeErr)
 	for i, p := range c.cfg.Providers {
@@ -383,7 +417,7 @@ func (c *Controller) observe(ctx context.Context) {
 		c.routerSt = &routerSt
 	}
 	c.localSt = nil
-	if localErr == nil {
+	if !skipLocal && localErr == nil {
 		c.localSt = &localSt
 	}
 	c.cloudSt = nil
@@ -487,7 +521,7 @@ func (c *Controller) decide(ctx context.Context) {
 			} else if c.cfg.WarmMin > 0 {
 				c.event("info", fmt.Sprintf("클라우드 인스턴스를 대기용 %d개로 축소했습니다 (트래픽 0%%, 대피 대비 예열)", c.cfg.WarmMin))
 			} else {
-				c.event("info", "클라우드 인스턴스를 0개로 축소했습니다 (비용 0)")
+				c.event("info", "클라우드 버스트 인스턴스를 0개로 축소했습니다 (앵커 VM·대기 DB 비용은 계속 발생)")
 			}
 		}
 	}
@@ -518,6 +552,34 @@ func (c *Controller) decide(ctx context.Context) {
 	c.localDownSince = since(c.localDownSince, localDown, now)
 	appDown := !c.localAppHealthy() && localAgentUp
 	c.appDownSince = since(c.appDownSince, appDown, now)
+	if c.prewarmDone != nil {
+		select {
+		case err := <-c.prewarmDone:
+			c.prewarmDone = nil
+			if err != nil {
+				c.event("warn", "클라우드 사전 기동 실패: "+err.Error())
+			}
+		default:
+		}
+	}
+	// Start cold cloud apps during the existing confirmation window. Keep
+	// traffic on the local site and do not promote the DB until EVAC_AFTER.
+	if c.mode == ModeNormal && c.target == 0 && c.autoEvac && c.seenLocal && localDown &&
+		c.cloudSt != nil && c.cloudSt.Running && len(c.cfg.Providers) > 0 && !c.prewarmIssued &&
+		!held(c.localDownSince, now, c.cfg.EvacAfter) {
+		c.scaleDownAt = time.Time{}
+		c.prewarmIssued = true
+		c.prewarmDone = make(chan error, 1)
+		done := c.prewarmDone
+		n := c.cfg.EvacMin
+		go func() { done <- c.scaleProviders(ctx, n) }()
+		c.event("info", fmt.Sprintf("로컬 장애 의심: 확인 시간 동안 클라우드 앱 %d개 사전 기동 (라우팅·DB 역할 유지)", n))
+	}
+	if !localDown && c.prewarmIssued && c.prewarmDone == nil && c.mode == ModeNormal && c.target == 0 {
+		c.prewarmIssued = false
+		c.scaleDownAt = now.Add(5 * time.Second)
+		c.event("info", "로컬 장애 의심 해소: 대피 없이 사전 기동 인스턴스를 5초 뒤 축소")
+	}
 
 	switch c.mode {
 	case ModeNormal, ModeBurst:
@@ -647,6 +709,8 @@ func (c *Controller) scaleTo(ctx context.Context, n int, reason string) {
 }
 
 func (c *Controller) scaleProviders(ctx context.Context, n int) error {
+	c.scaleMu.Lock()
+	defer c.scaleMu.Unlock()
 	parts := cloud.Split(n, len(c.cfg.Providers))
 	var wg sync.WaitGroup
 	errs := make([]string, 0)
@@ -829,6 +893,7 @@ func (c *Controller) evacuate(ctx context.Context, planned bool, reason string) 
 	c.scaleDownAt = time.Time{}
 	scaleDone := make(chan error, 1)
 	go func() { scaleDone <- c.scaleProviders(ctx, evacN) }()
+	c.prewarmIssued = false
 
 	r.step("엣지: 로컬 사이트를 라우팅에서 제외 (격리)", func() error {
 		c.localEnabled = false
@@ -945,15 +1010,7 @@ func (c *Controller) failback(ctx context.Context) {
 	cloudHost, cloudPort := splitHostPort(c.cfg.CloudPGForLocal)
 	localHost, localPort := splitHostPort(c.cfg.LocalPGForCloud)
 
-	edgePaused, routerPaused := false, false
-	defer func() {
-		if edgePaused {
-			c.edgeCall(context.Background(), "/resume", nil)
-		}
-		if routerPaused {
-			c.routerCall(context.Background(), "POST", "/resume", nil)
-		}
-	}()
+	cutoverStarted, trafficResumed := false, false
 
 	r.step("로컬 DB 재구성 (클라우드 DB에서 베이스 백업)", func() error {
 		return c.ops.Do(ctx, "POST", c.cfg.LocalAgent+"/rebuild", map[string]any{"primary_host": cloudHost, "primary_port": cloudPort}, nil)
@@ -981,16 +1038,24 @@ func (c *Controller) failback(ctx context.Context) {
 		c.setMode(ModeSwitchingBack, reason)
 	}
 	r.step("엣지 + DB 라우터: 새 요청 대기, 진행 중 쿼리 마무리", func() error {
-		edgePaused = true
+		cutoverStarted = true // A timed-out pause may still have reached the edge.
 		if err := c.edgeCall(ctx, "/pause", map[string]string{"reason": "failback"}); err != nil {
 			return err
 		}
-		routerPaused = true
 		if err := c.routerCall(ctx, "POST", "/pause", map[string]bool{"kill": false}); err != nil {
 			return err
 		}
 		time.Sleep(800 * time.Millisecond)
 		return c.routerCall(ctx, "POST", "/kill", nil)
+	})
+	r.step("클라우드 주 DB 쓰기 차단 및 확인 (fence)", func() error {
+		if err := c.ops.Do(ctx, "POST", c.cfg.CloudAgent+"/fence", map[string]bool{"on": true}, nil); err != nil {
+			return err
+		}
+		return c.waitFor(ctx, 5*time.Second, 100*time.Millisecond, "클라우드 DB 쓰기 차단 확인", func() (bool, error) {
+			st, err := c.agentStatus(ctx, c.cfg.CloudAgent)
+			return err == nil && st.Running && st.Role == "primary" && st.Fenced, err
+		})
 	})
 	r.step("로컬 복제본이 마지막 쓰기까지 따라잡기 (RPO 0)", func() error {
 		return c.waitFor(ctx, 30*time.Second, 200*time.Millisecond, "복제 동기화", func() (bool, error) {
@@ -1002,20 +1067,33 @@ func (c *Controller) failback(ctx context.Context) {
 			if err != nil {
 				return false, err
 			}
-			return l.LSNBytes >= cl.LSNBytes, nil
+			return l.Running && l.Role == "standby" && l.Streaming && cl.Running && cl.Role == "primary" && cl.Fenced && l.LSNBytes >= cl.LSNBytes, nil
 		})
 	})
 	r.step("로컬 DB 승격 (주 DB 복귀)", func() error {
-		return c.ops.Do(ctx, "POST", c.cfg.LocalAgent+"/promote", nil, nil)
-	})
-	r.step("클라우드 DB 쓰기 차단 (fence)", func() error {
-		return c.ops.Do(ctx, "POST", c.cfg.CloudAgent+"/fence", map[string]bool{"on": true}, nil)
+		if err := c.ops.Do(ctx, "POST", c.cfg.LocalAgent+"/promote", nil, nil); err != nil {
+			return err
+		}
+		st, err := c.agentStatus(ctx, c.cfg.LocalAgent)
+		if err != nil {
+			return err
+		}
+		if !st.Running || st.Role != "primary" || st.Fenced {
+			return fmt.Errorf("로컬 DB 승격 미확인: role=%s fenced=%t", st.Role, st.Fenced)
+		}
+		return nil
 	})
 	r.step("DB 라우터: 로컬 DB로 전환", func() error {
 		if err := c.routerCall(ctx, "PUT", "/target", map[string]any{"addr": c.cfg.RouterLocalPG, "kill": true}); err != nil {
 			return err
 		}
-		routerPaused = false
+		var st dbrouter.Status
+		if err := c.ops.Do(ctx, "GET", c.cfg.DBRouterAdmin+"/status", nil, &st); err != nil {
+			return err
+		}
+		if st.Target != c.cfg.RouterLocalPG {
+			return fmt.Errorf("DB 라우터 대상 확인 실패: %q", st.Target)
+		}
 		return c.routerCall(ctx, "POST", "/resume", nil)
 	})
 	r.step("엣지: 로컬 사이트 재편입, 클라우드 트래픽 0%", func() error {
@@ -1031,8 +1109,11 @@ func (c *Controller) failback(ctx context.Context) {
 		})
 	})
 	r.step("엣지: 붙잡아 둔 요청을 로컬로 흘려보냄", func() error {
-		edgePaused = false
-		return c.edgeCall(ctx, "/resume", nil)
+		if err := c.edgeCall(ctx, "/resume", nil); err != nil {
+			return err
+		}
+		trafficResumed = true
+		return nil
 	})
 	r.step("클라우드 DB를 로컬의 복제본으로 재구성 (보호 재개)", func() error {
 		return c.ops.Do(ctx, "POST", c.cfg.CloudAgent+"/rebuild", map[string]any{"primary_host": localHost, "primary_port": localPort}, nil)
@@ -1040,12 +1121,35 @@ func (c *Controller) failback(ctx context.Context) {
 	r.finish()
 
 	if r.failed {
-		if c.mode == ModeFailbackSync {
-			c.setMode(ModeEvacuated, "페일백 실패")
-		} else {
-			c.setMode(ModeEvacuated, "페일백 전환 실패")
+		if trafficResumed {
+			// Re-protection failed after the user-facing switch. Never claim the
+			// cloud is still primary; local is serving, but has no standby yet.
+			c.setMode(ModeNormal, "페일백 완료, 클라우드 복제본 재구성 실패")
+			c.event("error", "로컬 주 DB로 전환됐지만 클라우드 복제본 복구에 실패했습니다")
+			return
 		}
-		c.event("error", "페일백이 완료되지 않았습니다. 작업 기록을 확인하세요")
+		if !cutoverStarted {
+			c.setMode(ModeEvacuated, "페일백 준비 실패")
+			c.event("error", "페일백 준비 실패: 클라우드를 주 사이트로 유지합니다")
+			return
+		}
+		if err := c.rollbackFailback(ctx); err != nil {
+			// A promotion may have succeeded even when its HTTP response was
+			// lost. Keep traffic paused until an operator can inspect both DBs.
+			pauseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if pauseErr := c.edgeCall(pauseCtx, "/pause", map[string]string{"reason": "failback-recovery"}); pauseErr != nil {
+				c.event("error", "페일백 복구 중 엣지 일시정지 실패: "+pauseErr.Error())
+			}
+			if pauseErr := c.routerCall(pauseCtx, "POST", "/pause", map[string]bool{"kill": true}); pauseErr != nil {
+				c.event("error", "페일백 복구 중 DB 라우터 일시정지 실패: "+pauseErr.Error())
+			}
+			cancel()
+			c.setMode(ModeSwitchingBack, "페일백 중단: 수동 복구 필요")
+			c.event("error", "페일백 중단: 요청을 재개하지 않았습니다 — "+err.Error())
+			return
+		}
+		c.setMode(ModeEvacuated, "페일백 실패, 클라우드로 원상복구")
+		c.event("warn", "페일백 실패: 클라우드 주 DB로 안전하게 원상복구했습니다")
 		return
 	}
 	c.quietUntil = time.Now().Add(8 * time.Second)
@@ -1056,6 +1160,55 @@ func (c *Controller) failback(ctx context.Context) {
 	c.view.LocalReturned = false
 	c.mu.Unlock()
 	c.event("action", fmt.Sprintf("페일백 완료: 로컬이 다시 주 사이트입니다 (%.1f초). 클라우드 DB는 복제본으로 재구성 중", float64(r.op.TotalMS)/1000))
+}
+
+// rollbackFailback is only safe before promotion. Re-read the database roles:
+// the promote request might have completed even if its HTTP response was lost.
+// On any uncertainty, leave the edge and router paused for manual recovery.
+func (c *Controller) rollbackFailback(_ context.Context) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	local, err := c.agentStatus(ctx, c.cfg.LocalAgent)
+	if err != nil {
+		return fmt.Errorf("로컬 DB 역할 확인 실패: %w", err)
+	}
+	cloud, err := c.agentStatus(ctx, c.cfg.CloudAgent)
+	if err != nil {
+		return fmt.Errorf("클라우드 DB 역할 확인 실패: %w", err)
+	}
+	if !local.Running || local.Role != "standby" || !cloud.Running || cloud.Role != "primary" {
+		return fmt.Errorf("자동 원상복구 불가: local=%s cloud=%s", local.Role, cloud.Role)
+	}
+	if cloud.Fenced {
+		if err := c.ops.Do(ctx, "POST", c.cfg.CloudAgent+"/fence", map[string]bool{"on": false}, nil); err != nil {
+			return fmt.Errorf("클라우드 DB 쓰기 재개 실패: %w", err)
+		}
+	}
+	if err := c.waitFor(ctx, 5*time.Second, 100*time.Millisecond, "클라우드 DB 쓰기 재개 확인", func() (bool, error) {
+		st, err := c.agentStatus(ctx, c.cfg.CloudAgent)
+		return err == nil && st.Running && st.Role == "primary" && !st.Fenced, err
+	}); err != nil {
+		return err
+	}
+	if err := c.routerCall(ctx, "PUT", "/target", map[string]any{"addr": c.cfg.RouterCloudPG, "kill": true}); err != nil {
+		return err
+	}
+	var router dbrouter.Status
+	if err := c.ops.Do(ctx, "GET", c.cfg.DBRouterAdmin+"/status", nil, &router); err != nil {
+		return err
+	}
+	if router.Target != c.cfg.RouterCloudPG {
+		return fmt.Errorf("클라우드 DB 라우터 대상 확인 실패: %q", router.Target)
+	}
+	c.localEnabled = false
+	c.target = max(c.cfg.EvacMin, 1)
+	if err := c.syncEdge(ctx, true); err != nil {
+		return err
+	}
+	if err := c.routerCall(ctx, "POST", "/resume", nil); err != nil {
+		return err
+	}
+	return c.edgeCall(ctx, "/resume", nil)
 }
 
 func splitHostPort(addr string) (string, int) {

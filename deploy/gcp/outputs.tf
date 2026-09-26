@@ -3,10 +3,6 @@ output "public_url" {
   value       = "http://${google_compute_address.anchor.address}"
 }
 
-output "dashboard_url" {
-  value = "http://${google_compute_address.anchor.address}:8090"
-}
-
 output "anchor_internal_ip" {
   description = "Cloud Run reaches the DB router here over Direct VPC egress"
   value       = google_compute_instance.anchor.network_interface[0].network_ip

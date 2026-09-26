@@ -4,8 +4,9 @@
 # reach each other on 127.0.0.1 and the local site over the tailnet.
 # Published on the VM:
 #   :80   edge (public entry point, the URL users open)
-#   :8090 control plane + dashboard (protected by SPILLWAY_TOKEN for changes)
 #   :6432 DB router (firewalled to the VPC; Cloud Run connects here)
+# Tailnet only, not published on the VM:
+#   :8090 control plane + dashboard
 #
 #   cp .env.example .env   # fill in tailnet IPs, secrets, provider settings
 #   docker compose up -d
@@ -33,7 +34,6 @@ services:
     cap_add: [NET_ADMIN, NET_RAW]
     ports:
       - "80:8080"     # edge
-      - "8090:8090"   # control plane / dashboard
       - "6432:6432"   # DB router for Cloud Run (firewalled to the VPC)
     restart: unless-stopped
 
@@ -47,7 +47,7 @@ services:
       SITE: cloud
       ROLE_INIT: standby
       PRIMARY_HOST: ${LOCAL_TS_IP:?set LOCAL_TS_IP}
-      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN}
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN:?set SPILLWAY_TOKEN in .env}
       REPL_PASSWORD: ${REPL_PASSWORD}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
     volumes: [cloud-db:/var/lib/postgresql/data]
@@ -56,7 +56,7 @@ services:
     <<: *app
     command: ["dbrouter"]
     environment:
-      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN}
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN:?set SPILLWAY_TOKEN in .env}
       DBROUTER_LISTEN: ":6432"
       DBROUTER_ADMIN_LISTEN: "127.0.0.1:7100"
       DBROUTER_TARGET: ${LOCAL_TS_IP}:5432
@@ -65,7 +65,7 @@ services:
     <<: *app
     command: ["edge"]
     environment:
-      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN}
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN:?set SPILLWAY_TOKEN in .env}
       EDGE_LISTEN: ":8080"
       EDGE_ADMIN_LISTEN: "127.0.0.1:8081"
       EDGE_BACKENDS: local=http://${LOCAL_TS_IP}:8080@local:${LOCAL_UNITS:-1}
@@ -74,7 +74,7 @@ services:
     <<: *app
     command: ["probe"]
     environment:
-      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN}
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN:?set SPILLWAY_TOKEN in .env}
       PROBE_LISTEN: "127.0.0.1:7200"
       PROBE_TARGET: http://127.0.0.1:8080
 
@@ -83,7 +83,7 @@ services:
     command: ["control"]
     volumes: [control-data:/data]
     environment:
-      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN}
+      SPILLWAY_TOKEN: ${SPILLWAY_TOKEN:?set SPILLWAY_TOKEN in .env}
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost}
       EVENT_LOG: /data/audit.jsonl
       CONTROL_LISTEN: ":8090"

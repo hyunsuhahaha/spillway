@@ -189,7 +189,7 @@
             <button id="btn-probe-reset">프로브 초기화</button>
           </div>
           <div class="btns" style="margin-top:8px;align-items:center">
-            <label class="inline">토큰 <input type="password" id="token" style="width:140px" placeholder="SPILLWAY_TOKEN"></label>
+            <label class="inline">토큰 <input type="password" id="token" style="width:140px" placeholder="SPILLWAY_TOKEN" autocomplete="off"></label>
           </div>
         </div>
       </div>
@@ -216,13 +216,11 @@
   const rows = (list) => list.map(([k, v]) => `<div class="row"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`).join("");
   const pill = (cls, text) => `<span class="pill ${cls}">${esc(text)}</span>`;
 
-  let token = "";
-  try { token = localStorage.getItem("spillway-token") || ""; } catch (_) {}
-  $("token").value = token;
-  $("token").addEventListener("change", () => { token = $("token").value; try { localStorage.setItem("spillway-token", token); } catch (_) {} });
+  // Remove credentials left by older dashboard versions; never persist them.
+  try { localStorage.removeItem("spillway-token"); } catch (_) {}
 
   async function post(path, body) {
-    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Spillway-Token": token }, body: JSON.stringify(body || {}) });
+    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Spillway-Token": $("token").value }, body: JSON.stringify(body || {}) });
     if (!res.ok) {
       const msg = (await res.json().catch(() => ({}))).error || res.statusText;
       alert("요청 실패: " + msg);

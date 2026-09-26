@@ -1,0 +1,30 @@
+name: Verify Spillway
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Go tests and vet
+        run: |
+          go test -race ./...
+          go vet ./...
+      - name: Deployment planner and rollback tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          python3 scripts/deploy_webapp.py --dry-run
+      - name: Example app builds
+        run: docker build -t spillway-hello:ci examples/hello

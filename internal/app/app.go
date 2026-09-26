@@ -150,7 +150,9 @@ func (a *App) migrateLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(2 * time.Second):
+		// A burst app may start before the DB router changes primary. Retry
+		// promptly so an already-running instance becomes ready at cutover.
+		case <-time.After(500 * time.Millisecond):
 		}
 	}
 }

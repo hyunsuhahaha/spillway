@@ -15,3 +15,5 @@ crash.log
 *.exe
 results/
 .DS_Store
+__pycache__/
+*.pyc
