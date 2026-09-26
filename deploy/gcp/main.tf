@@ -27,7 +27,7 @@ locals {
 }
 
 resource "google_project_service" "services" {
-  for_each           = toset(["run.googleapis.com", "compute.googleapis.com", "artifactregistry.googleapis.com"])
+  for_each           = toset(["run.googleapis.com", "compute.googleapis.com", "artifactregistry.googleapis.com", "monitoring.googleapis.com"])
   service            = each.value
   disable_on_destroy = false
 }
@@ -68,6 +68,12 @@ resource "google_project_iam_member" "anchor_run" {
 resource "google_project_iam_member" "anchor_registry" {
   project = var.project
   role    = "roles/artifactregistry.reader"
+  member  = "serviceAccount:${google_service_account.anchor.email}"
+}
+
+resource "google_project_iam_member" "anchor_monitoring" {
+  project = var.project
+  role    = "roles/monitoring.viewer"
   member  = "serviceAccount:${google_service_account.anchor.email}"
 }
 

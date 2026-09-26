@@ -7,18 +7,18 @@
 # Cutting the local site from "wan" (scripts/sim.sh cut-local) is the same
 # failure the demo shows by unplugging the laptop's network cable.
 # Burst instances are containers the control plane creates on "wan".
-name: spillway-sim
+name: ${SPILLWAY_SIM_PROJECT:-spillway-sim}
 
 # Images are built once by local-app / local-db (see scripts/sim.sh up);
 # every other service reuses them.
 x-app: &app
-  image: spillway:latest
+  image: ${SPILLWAY_SIM_IMAGE:-spillway:latest}
   pull_policy: never
   restart: unless-stopped
   init: true
 
 x-pg: &pg
-  image: spillway-pg:latest
+  image: ${SPILLWAY_SIM_PG_IMAGE:-spillway-pg:latest}
   pull_policy: never
   restart: unless-stopped
   init: true
@@ -106,9 +106,9 @@ services:
       LOCAL_PG_FOR_CLOUD: local-db:5432
       CLOUD_PROVIDERS: docker
       DOCKER_PROVIDER_NAME: sim-cloud
-      BURST_IMAGE: spillway:latest
-      BURST_NETWORK: spillway-sim_wan
-      BURST_PREFIX: spillway-burst
+      BURST_IMAGE: ${SPILLWAY_SIM_IMAGE:-spillway:latest}
+      BURST_NETWORK: ${SPILLWAY_SIM_PROJECT:-spillway-sim}_wan
+      BURST_PREFIX: ${SPILLWAY_SIM_BURST_PREFIX:-spillway-burst}
       BURST_ENV: SITE=cloud;DB_URL=postgres://spillway:${APP_DB_PASSWORD:-spillway-secret}@dbrouter:6432/spillway?sslmode=disable;WORK_MS=${WORK_MS:-25};MAX_INFLIGHT=${LOCAL_MAX_INFLIGHT:-3}
       BURST_P95_HIGH_MS: ${BURST_P95_HIGH_MS:-250}
       BURST_P95_LOW_MS: ${BURST_P95_LOW_MS:-120}

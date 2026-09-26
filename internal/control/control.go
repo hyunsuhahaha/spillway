@@ -677,6 +677,12 @@ func (c *Controller) desiredBackends() []edge.BackendSpec {
 	specs := []edge.BackendSpec{{Name: "local", URL: c.cfg.LocalAppURL, Group: "local", Units: units, Enabled: c.localEnabled}}
 	for _, st := range c.provSt {
 		for _, ep := range st.Endpoints {
+			// An idle Cloud Run endpoint must not stay in the edge's health
+			// checker: each probe is a request that can wake a zero-min service.
+			// Keep warm-min endpoints so their readiness can still be observed.
+			if c.target == 0 && c.cfg.WarmMin == 0 && st.Kind == "cloudrun" && st.Desired == 0 {
+				continue
+			}
 			u := ep.Units
 			if c.target == 0 {
 				u = 0

@@ -21,13 +21,18 @@ type Endpoint struct {
 
 // Status describes the provider's current capacity.
 type Status struct {
-	Provider  string     `json:"provider"`
-	Kind      string     `json:"kind"`
-	Desired   int        `json:"desired"`
-	Ready     int        `json:"ready"`
-	Endpoints []Endpoint `json:"endpoints"`
-	Detail    string     `json:"detail,omitempty"`
-	Err       string     `json:"err,omitempty"`
+	Provider string `json:"provider"`
+	Kind     string `json:"kind"`
+	Desired  int    `json:"desired"`
+	Ready    int    `json:"ready"`
+	// Observed is a delayed Cloud Monitoring sample of actual instances.
+	// Nil means the provider cannot report an observed count.
+	Observed    *int       `json:"observed,omitempty"`
+	ObservedAt  string     `json:"observed_at,omitempty"`
+	ObservedErr string     `json:"observed_err,omitempty"`
+	Endpoints   []Endpoint `json:"endpoints"`
+	Detail      string     `json:"detail,omitempty"`
+	Err         string     `json:"err,omitempty"`
 }
 
 // Provider scales burst capacity on one platform.

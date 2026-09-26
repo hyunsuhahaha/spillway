@@ -38,6 +38,28 @@ func TestDesiredBackendsZeroUnitsWhenNotBursting(t *testing.T) {
 	}
 }
 
+func TestIdleCloudRunDoesNotReachEdgeHealthChecker(t *testing.T) {
+	c := testController()
+	c.provSt = []cloud.Status{{Kind: "cloudrun", Endpoints: []cloud.Endpoint{{Name: "run", URL: "https://app.run.app", Units: 2}}}}
+	if got := c.desiredBackends(); len(got) != 1 {
+		t.Fatalf("zero-min Cloud Run should be absent from edge: %+v", got)
+	}
+	c.cfg.WarmMin = 1
+	if got := c.desiredBackends(); len(got) != 2 || got[1].Units != 0 {
+		t.Fatalf("warm Cloud Run should be health-checked but not routed: %+v", got)
+	}
+	c.cfg.WarmMin = 0
+	c.target = 2
+	if got := c.desiredBackends(); len(got) != 2 || got[1].Units != 2 {
+		t.Fatalf("burst Cloud Run should be routed: %+v", got)
+	}
+	c.target = 0
+	c.provSt[0].Desired = 2 // keep draining in-flight requests before scale-down
+	if got := c.desiredBackends(); len(got) != 2 || got[1].Units != 0 {
+		t.Fatalf("draining Cloud Run should remain configured: %+v", got)
+	}
+}
+
 func TestHeldNeedsTheConditionToHaveStarted(t *testing.T) {
 	now := time.Now()
 	if held(time.Time{}, now, 0) {

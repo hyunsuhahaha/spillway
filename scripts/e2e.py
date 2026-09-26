@@ -25,6 +25,7 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONTROL = "http://localhost:8090"
 TOKEN = os.environ.get("SPILLWAY_TOKEN", "")
+SIM_PROJECT = os.environ.get("SPILLWAY_SIM_PROJECT", "spillway-sim")
 RESULTS = []
 
 # Windows consoles default to a legacy code page; the report text is Korean.
@@ -50,7 +51,7 @@ def state():
 
 
 def sim(cmd):
-    subprocess.run(["bash", os.path.join(ROOT, "scripts", "sim.sh"), cmd], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["bash", "scripts/sim.sh", cmd, SIM_PROJECT], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
 
 
 def log(msg):
@@ -134,7 +135,7 @@ def scenario_burst(report):
     }
     check("버스트: 부하 중 클라우드 인스턴스가 생성됨", peak >= 2, f"최대 {peak}개")
     check("버스트: 부하 요청 실패 0건", load.get("failed") == 0, f"보냄 {load.get('sent')}, 실패 {load.get('failed')}")
-    check("버스트: 부하 종료 후 평상 복귀 및 축소", True, f"{warm}개로 축소")
+    check("버스트: 부하 종료 후 평상 복귀 및 축소", v["mode"] == "NORMAL" and instances(v) == warm, f"{warm}개로 축소")
     check("버스트: 데이터 유실 0건", p.get("lost") == 0)
 
 
@@ -159,13 +160,13 @@ def scenario_evacuation(report):
     }
     check("대피: 자동 대피 완료", op.get("ok") is True, f"감지 {t_start:.1f}s + 전환 {op.get('total_ms', 0) / 1000:.1f}s")
     check("대피: 전환 중 사용자 요청 실패 0건 (엣지가 대기시킴)", outage.get("failures", 0) == 0, f"무응답 {outage.get('seconds')}s")
-    check("대피: 확인 응답 받은 쓰기 유실 (비동기 복제)", True, f"{p.get('lost')}건 (비동기 복제 특성상 0이 보장되지는 않음)")
+    log(f"   대피 중 확인 응답 받은 쓰기 유실: {p.get('lost')}건 (비동기 복제이므로 0은 보장하지 않음)")
 
     log("   대피 상태에서 컨트롤 플레인 재시작")
-    subprocess.run(["docker", "restart", "spillway-sim-control-1"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "restart", f"{SIM_PROJECT}-control-1"], check=True, stdout=subprocess.DEVNULL)
     v, t_rec = wait("control plane back in EVACUATED", lambda v: v["mode"] == "EVACUATED" and v["router"]["target"].startswith("cloud-db"), 60)
     report["evacuation"]["control_restart_recovered_s"] = round(t_rec, 1)
-    check("재시작: 컨트롤 플레인이 대피 상태를 DB 역할에서 복원", True, f"{t_rec:.1f}s")
+    check("재시작: 컨트롤 플레인이 대피 상태를 DB 역할에서 복원", v["mode"] == "EVACUATED" and v["router"]["target"].startswith("cloud-db"), f"{t_rec:.1f}s")
     restored = last_op(v)
     check("재시작: 작업 로그(대피 단계 기록)가 파일에서 복원됨", restored.get("kind") == "evacuate" and len(restored.get("steps") or []) > 0,
           f"이벤트 {len(v.get('events') or [])}건")
@@ -175,7 +176,7 @@ def scenario_failback(report):
     log("== 3. 로컬 복귀 + 페일백")
     sim("restore-local")
     v, _ = wait("local returned + fenced", lambda v: v.get("local_returned") and (v["local"].get("status") or {}).get("fenced"), 60)
-    check("복귀: 돌아온 옛 주 DB가 자동으로 읽기 전용 격리됨 (스플릿 브레인 방지)", True)
+    check("복귀: 돌아온 옛 주 DB가 자동으로 읽기 전용 격리됨 (스플릿 브레인 방지)", v.get("local_returned") and (v["local"].get("status") or {}).get("fenced"))
     reset_probe()
     api("POST", "/api/failback")
     v, _ = wait("failback finished", lambda v: v["mode"] == "NORMAL" and not last_op(v).get("running") and last_op(v).get("kind") == "failback", 300)
@@ -193,7 +194,7 @@ def scenario_failback(report):
     }
     check("페일백: 로컬이 주 사이트로 복귀", op.get("ok") is True, f"{op.get('total_ms', 0) / 1000:.1f}s")
     check("페일백: 데이터 유실 0건 (RPO 0 전환)", p.get("lost") == 0)
-    check("페일백: 클라우드 복제본 재구성 → 보호 정상", True, f"{t_prot:.1f}s")
+    check("페일백: 클라우드 복제본 재구성 → 보호 정상", v["protection"]["state"] == "ok", f"{t_prot:.1f}s")
 
 
 def scenario_migration(report):

@@ -111,7 +111,7 @@
     <div class="panel kpi"><div class="label">사용자 체감 응답 p95</div><div class="value" id="k-p95">–</div><div class="sub" id="k-p95-sub"></div></div>
     <div class="panel kpi"><div class="label">처리량</div><div class="value" id="k-rps">–</div><div class="sub" id="k-rps-sub"></div></div>
     <div class="panel kpi"><div class="label">트래픽 분담 (로컬 / 클라우드)</div><div class="value" id="k-share">–</div><div class="sub" id="k-share-sub"></div></div>
-    <div class="panel kpi"><div class="label">클라우드 인스턴스</div><div class="value" id="k-inst">–</div><div class="sub" id="k-inst-sub"></div></div>
+    <div class="panel kpi"><div class="label">클라우드 인스턴스 (관측)</div><div class="value" id="k-inst">–</div><div class="sub" id="k-inst-sub"></div></div>
     <div class="panel kpi"><div class="label">데이터 보호</div><div class="value" id="k-prot">–</div><div class="sub" id="k-prot-sub"></div></div>
     <div class="panel kpi"><div class="label">버스트 누적 비용 (추정)</div><div class="value" id="k-cost">–</div><div class="sub" id="k-cost-sub"></div></div>
   </section>
@@ -139,7 +139,7 @@
 
   <section class="grid charts">
     <div class="panel"><h2>응답 시간 p95 (ms) — 검정: 사용자 체감 · 파랑: 백엔드 처리 · 점선: 버스트/복귀 임계치</h2><canvas id="ch-lat"></canvas></div>
-    <div class="panel"><h2>처리량 (rps) — 검정: rps · 파랑 영역: 클라우드 인스턴스 · 초록 점선: 로컬 분담률</h2><canvas id="ch-rps"></canvas></div>
+    <div class="panel"><h2>처리량 (rps) — 검정: rps · 파랑 영역: 클라우드 최소 설정/준비 수 · 초록 점선: 로컬 분담률</h2><canvas id="ch-rps"></canvas></div>
   </section>
 
   <section class="grid lower">
@@ -264,15 +264,17 @@
     const lp = gl + gc ? Math.round(gl / (gl + gc) * 100) : 100;
     $("k-share").textContent = `${lp} / ${100 - lp}`;
     $("k-share-sub").textContent = "최근 10초 요청 기준 (%)";
-    const inst = (v.providers || []).reduce((a, p) => a + (p.ready || 0), 0);
+    const providers = v.providers || [];
+    const hasObserved = providers.every((p) => p.kind !== "cloudrun" || p.observed !== undefined);
+    const inst = providers.reduce((a, p) => a + (p.kind === "cloudrun" ? (p.observed || 0) : (p.ready || 0)), 0);
     const desired = (v.providers || []).reduce((a, p) => a + (p.desired || 0), 0);
-    $("k-inst").textContent = `${inst}`;
-    $("k-inst-sub").textContent = `목표 ${desired} · 최대 ${fmt(set.burst_max)}${set.warm_min ? " · 예열 " + set.warm_min : ""} · ${set.providers || ""}`;
+    $("k-inst").textContent = hasObserved ? `${inst}` : "–";
+    $("k-inst-sub").textContent = `목표 ${desired} · 최대 ${fmt(set.burst_max)} · Cloud Run 관측은 최대 수분 지연${set.warm_min ? " · 예열 " + set.warm_min : ""}`;
     const prot = v.protection || {};
     $("k-prot").innerHTML = prot.state === "ok" ? `<span style="color:var(--local)">정상</span>` : prot.state === "degraded" ? `<span style="color:var(--warn)">저하</span>` : `<span style="color:var(--bad)">없음</span>`;
     $("k-prot-sub").textContent = prot.detail + (prot.lag_bytes >= 0 ? ` · 지연 ${bytes(prot.lag_bytes)}` : "");
     $("k-cost").textContent = "₩" + fmt(v.cost_krw, 1);
-    $("k-cost-sub").textContent = `인스턴스 ${fmt(v.instance_seconds)}초 · 대기 복제본 ₩${fmt(set.standby_cost_per_hour_krw)}/시간`;
+    $("k-cost-sub").textContent = `${providers.some((p) => p.kind === "cloudrun") ? "설정된 최소 용량" : "준비된 용량"} 기준 ${fmt(v.instance_seconds)}초 (실청구 아님) · 대기 복제본 ₩${fmt(set.standby_cost_per_hour_krw)}/시간`;
 
     // Local site
     const localB = ed?.backends?.find((b) => b.name === "local");
@@ -306,7 +308,9 @@
     $("c-dot").style.background = dotColor(cs.reachable, true);
     $("c-title").textContent = cst.site ? `사이트 "${cst.site}"` : "클라우드";
     const rep = (v.local.status?.replicas || []).find((r) => r.name === cst.site);
-    const provRows = (v.providers || []).map((p) => [p.provider, `${p.ready}/${p.desired} 준비${p.err ? " " + pill("p-bad", "오류") : ""}`]);
+    const provRows = (v.providers || []).map((p) => [p.provider, p.kind === "cloudrun"
+      ? `${p.observed === undefined ? "–" : p.observed} 관측${p.observed_at && p.observed !== undefined ? " (" + new Date(p.observed_at).toLocaleTimeString() + ")" : ""} · 최소 ${p.desired} 설정${p.observed_err ? " " + pill("p-warn", "계측 오류") : ""}${p.err ? " " + pill("p-bad", "오류") : ""}`
+      : `${p.ready}/${p.desired} 준비${p.err ? " " + pill("p-bad", "오류") : ""}`]);
     $("c-rows").innerHTML = rows([
       ["데이터베이스", dbPill(cs)],
       ["복제 지연", rep ? bytes(rep.lag_bytes) + (rep.sync === "sync" ? " (동기)" : " (비동기)") : "–"],

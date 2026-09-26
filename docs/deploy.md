@@ -58,6 +58,7 @@ terraform output cloud_env    # deploy/cloud/.env에 붙여넣을 값
 - 앵커 VM (Docker 설치 스크립트 포함), 고정 공인 IP, 방화벽 80/8090 공개, 6432는 VPC 내부만
 - Cloud Run `spillway-app`: 최소 0, 최대 10, Direct VPC egress로 앵커 VM의 dbrouter에 접속
 - 서비스 계정 두 개: Cloud Run 실행용, 앵커 VM용(`run.developer` — 컨트롤 플레인이 최소 인스턴스를 바꿈)
+- Cloud Monitoring API와 앵커 VM의 `monitoring.viewer`: 대시보드의 Cloud Run 실제 인스턴스 관측값에 사용. 지표는 최대 수분 늦으므로 라우팅 준비 판단에는 쓰지 않는다. 지표가 없으면 `–`로 표시하고 0으로 간주하지 않는다.
 
 ## 3. 클라우드 사이트 (앵커 VM)
 

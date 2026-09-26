@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
@@ -23,14 +25,18 @@ type CloudRun struct {
 	project, region, service, url string
 	http                          *http.Client
 
-	mu       sync.Mutex
-	desired  int
-	token    string
-	tokenExp time.Time
-	uri      string
-	ready    bool
-	lastErr  string
-	checked  time.Time
+	mu              sync.Mutex
+	desired         int
+	token           string
+	tokenExp        time.Time
+	uri             string
+	ready           bool
+	lastErr         string
+	checked         time.Time
+	observed        *int
+	observedAt      time.Time
+	observedChecked time.Time
+	observedErr     string
 }
 
 // NewCloudRunFromEnv configures the adapter from GCP_* / CLOUDRUN_* variables.
@@ -99,26 +105,28 @@ func (c *CloudRun) call(ctx context.Context, method, url string, body, out any) 
 // If the API rejects the service-level field it falls back to the revision
 // template, which deploys a new revision.
 func (c *CloudRun) Scale(ctx context.Context, n int) error {
-	c.mu.Lock()
-	c.desired = n
-	c.mu.Unlock()
 	err := c.call(ctx, http.MethodPatch, c.serviceURL()+"?updateMask=scaling.minInstanceCount",
 		map[string]any{"scaling": map[string]any{"minInstanceCount": n}}, nil)
-	if err == nil {
-		return nil
-	}
 	var se *httpx.StatusError
 	if errors.As(err, &se) && se.Code == http.StatusBadRequest {
-		return c.call(ctx, http.MethodPatch, c.serviceURL()+"?updateMask=template.scaling.minInstanceCount",
+		err = c.call(ctx, http.MethodPatch, c.serviceURL()+"?updateMask=template.scaling.minInstanceCount",
 			map[string]any{"template": map[string]any{"scaling": map[string]any{"minInstanceCount": n}}}, nil)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.desired = n
+	c.checked = time.Time{} // verify the new service state on the next poll
+	c.mu.Unlock()
+	return nil
 }
 
 // Status reads the service URL and readiness (cached for 5s).
 func (c *CloudRun) Status(ctx context.Context) Status {
 	c.mu.Lock()
 	stale := time.Since(c.checked) > 5*time.Second
+	observe := time.Since(c.observedChecked) > time.Minute
 	c.mu.Unlock()
 	if stale {
 		var svc struct {
@@ -139,6 +147,20 @@ func (c *CloudRun) Status(ctx context.Context) Status {
 		}
 		c.mu.Unlock()
 	}
+	if observe {
+		count, at, err := c.instanceCount(ctx)
+		c.mu.Lock()
+		c.observedChecked = time.Now()
+		if err != nil {
+			c.observed = nil
+			c.observedErr = err.Error()
+		} else {
+			c.observed = count
+			c.observedAt = at
+			c.observedErr = ""
+		}
+		c.mu.Unlock()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	url := c.url
@@ -147,11 +169,72 @@ func (c *CloudRun) Status(ctx context.Context) Status {
 	}
 	st := Status{Provider: c.Name(), Kind: "cloudrun", Desired: c.desired, Err: c.lastErr, Endpoints: []Endpoint{},
 		Detail: fmt.Sprintf("%s/%s/%s", c.project, c.region, c.service)}
+	if c.observed != nil {
+		count := *c.observed
+		st.Observed = &count
+		st.ObservedAt = c.observedAt.Format(time.RFC3339)
+	}
+	st.ObservedErr = c.observedErr
 	if c.ready || c.url != "" {
+		// This is the configured warm minimum, not an observed instance count.
 		st.Ready = c.desired
 	}
 	if url != "" {
 		st.Endpoints = append(st.Endpoints, Endpoint{Name: c.Name(), URL: url, Units: c.desired})
 	}
 	return st
+}
+
+// instanceCount reads the sampled Cloud Run instance gauge. Monitoring samples
+// every 60s and can publish up to 120s later, so this is for display only;
+// routing readiness continues to come from the edge's direct health checks.
+func (c *CloudRun) instanceCount(ctx context.Context) (*int, time.Time, error) {
+	now := time.Now().UTC()
+	q := url.Values{}
+	q.Set("filter", fmt.Sprintf(`metric.type="run.googleapis.com/container/instance_count" AND resource.type="cloud_run_revision" AND resource.labels.service_name="%s" AND resource.labels.location="%s"`, c.service, c.region))
+	q.Set("interval.startTime", now.Add(-5*time.Minute).Format(time.RFC3339))
+	q.Set("interval.endTime", now.Format(time.RFC3339))
+	q.Set("view", "FULL")
+	q.Set("pageSize", "1000")
+	var result struct {
+		TimeSeries []struct {
+			Points []struct {
+				Interval struct {
+					EndTime time.Time `json:"endTime"`
+				} `json:"interval"`
+				Value struct {
+					Int64Value string `json:"int64Value"`
+				} `json:"value"`
+			} `json:"points"`
+		} `json:"timeSeries"`
+		NextPageToken string `json:"nextPageToken"`
+	}
+	endpoint := "https://monitoring.googleapis.com/v3/projects/" + c.project + "/timeSeries?" + q.Encode()
+	if err := c.call(ctx, http.MethodGet, endpoint, nil, &result); err != nil {
+		return nil, time.Time{}, err
+	}
+	if result.NextPageToken != "" {
+		return nil, time.Time{}, errors.New("instance metric exceeded one page")
+	}
+	latest := time.Time{}
+	for _, series := range result.TimeSeries {
+		if len(series.Points) > 0 && series.Points[0].Interval.EndTime.After(latest) {
+			latest = series.Points[0].Interval.EndTime
+		}
+	}
+	if latest.IsZero() || now.Sub(latest) > 4*time.Minute {
+		return nil, time.Time{}, nil // no recent sample is not proof of zero
+	}
+	count := 0
+	for _, series := range result.TimeSeries {
+		if len(series.Points) == 0 || latest.Sub(series.Points[0].Interval.EndTime) > 90*time.Second {
+			continue
+		}
+		n, err := strconv.Atoi(series.Points[0].Value.Int64Value)
+		if err != nil || n < 0 {
+			return nil, time.Time{}, fmt.Errorf("invalid instance metric value %q", series.Points[0].Value.Int64Value)
+		}
+		count += n
+	}
+	return &count, latest, nil
 }

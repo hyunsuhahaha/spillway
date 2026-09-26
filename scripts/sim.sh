@@ -8,17 +8,28 @@
 #   ./scripts/sim.sh start-local-app bring the local web app back
 #   ./scripts/sim.sh status          one-line status from the control plane
 #   ./scripts/sim.sh logs [svc]      follow logs
+#   ./scripts/sim.sh cut-local spillway-check  target an isolated project
 set -euo pipefail
 cd "$(dirname "$0")/../deploy/sim"
 export MSYS_NO_PATHCONV=1
 
-PROJECT=spillway-sim
+if [ "${1:-}" = "logs" ]; then
+  PROJECT=${SPILLWAY_SIM_PROJECT:-spillway-sim} # second argument is the service name
+else
+  PROJECT=${2:-${SPILLWAY_SIM_PROJECT:-spillway-sim}}
+fi
+if [ "$PROJECT" = "spillway-sim" ]; then
+  BURST_PREFIX=${SPILLWAY_SIM_BURST_PREFIX:-spillway-burst}
+else
+  BURST_PREFIX=${SPILLWAY_SIM_BURST_PREFIX:-${PROJECT}-burst}
+fi
+export SPILLWAY_SIM_PROJECT="$PROJECT" SPILLWAY_SIM_BURST_PREFIX="$BURST_PREFIX"
 WAN=${PROJECT}_wan
 LOCAL_CONTAINERS=("${PROJECT}-local-app-1" "${PROJECT}-local-db-1")
 
 burst_rm() {
   local ids
-  ids=$(docker ps -aq --filter "label=spillway.burst=spillway-burst" || true)
+  ids=$(docker ps -aq --filter "label=spillway.burst=$BURST_PREFIX" || true)
   if [ -n "$ids" ]; then docker rm -f $ids >/dev/null; fi
 }
 
@@ -35,13 +46,23 @@ case "${1:-}" in
     docker compose down -v --remove-orphans
     ;;
   cut-local)
-    for c in "${LOCAL_CONTAINERS[@]}"; do docker network disconnect "$WAN" "$c" 2>/dev/null || true; done
+    for c in "${LOCAL_CONTAINERS[@]}"; do
+      docker network disconnect "$WAN" "$c" 2>/dev/null || true
+      if docker inspect "$c" --format '{{json .NetworkSettings.Networks}}' | grep -Fq "\"$WAN\""; then
+        echo "네트워크 분리 실패: $c" >&2
+        exit 1
+      fi
+    done
     echo "로컬 사이트를 인터넷에서 분리했습니다 (케이블 뽑기)."
     ;;
   restore-local)
     for c in "${LOCAL_CONTAINERS[@]}"; do
       alias=${c#${PROJECT}-}; alias=${alias%-1}
       docker network connect --alias "$alias" "$WAN" "$c" 2>/dev/null || true
+      if ! docker inspect "$c" --format '{{json .NetworkSettings.Networks}}' | grep -Fq "\"$WAN\""; then
+        echo "네트워크 복구 실패: $c" >&2
+        exit 1
+      fi
     done
     echo "로컬 사이트를 다시 연결했습니다."
     ;;
