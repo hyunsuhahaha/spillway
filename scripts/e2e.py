@@ -17,6 +17,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -51,7 +52,8 @@ def state():
 
 
 def sim(cmd):
-    subprocess.run(["bash", "scripts/sim.sh", cmd, SIM_PROJECT], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
+    # shutil.which: on Windows a bare "bash" may resolve to WSL, which has no docker.
+    subprocess.run([shutil.which("bash") or "bash", "scripts/sim.sh", cmd, SIM_PROJECT], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
 
 
 def log(msg):

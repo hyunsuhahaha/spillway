@@ -1,12 +1,16 @@
-// Package app is the sample web application Spillway deploys: a guestbook
-// backed by Postgres. Every response says which site served it so the demo
-// audience can watch traffic move between the laptop and the cloud.
-package app
+// Command guestbook is an ordinary user web app that Spillway deploys: a
+// guestbook backed by Postgres. It knows nothing about Spillway beyond the app
+// contract (PORT, DB_URL, SITE, GET /healthz; README "앱 계약"). Every response
+// says which site served it so the audience can watch traffic move between the
+// laptop and the cloud.
+package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -15,21 +19,34 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/net/proxy"
-
-	"spillway/internal/httpx"
 )
 
 //go:embed page.html
 var pageHTML string
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	a, err := New(ConfigFromEnv())
+	if err == nil {
+		err = a.Run(ctx)
+	}
+	if err != nil {
+		log.Fatalf("guestbook: %v", err)
+	}
+}
 
 // Config configures the app.
 type Config struct {
@@ -46,13 +63,13 @@ type Config struct {
 func ConfigFromEnv() Config {
 	host, _ := os.Hostname()
 	return Config{
-		Listen:      ":" + httpx.Env("PORT", "8080"),
-		Site:        httpx.Env("SITE", "local"),
-		Instance:    httpx.Env("INSTANCE", httpx.Env("K_REVISION", host)),
-		DBURL:       httpx.Env("DB_URL", "postgres://spillway:spillway-secret@localhost:5432/spillway?sslmode=disable"),
-		DBSocks5:    httpx.Env("DB_SOCKS5", ""),
-		WorkMS:      httpx.EnvInt("WORK_MS", 0),
-		MaxInflight: httpx.EnvInt("MAX_INFLIGHT", 0),
+		Listen:      ":" + env("PORT", "8080"),
+		Site:        env("SITE", "local"),
+		Instance:    env("INSTANCE", env("K_REVISION", host)),
+		DBURL:       env("DB_URL", "postgres://spillway:spillway-secret@localhost:5432/spillway?sslmode=disable"),
+		DBSocks5:    env("DB_SOCKS5", ""),
+		WorkMS:      envInt("WORK_MS", 0),
+		MaxInflight: envInt("MAX_INFLIGHT", 0),
 	}
 }
 
@@ -115,7 +132,7 @@ func New(cfg Config) (*App, error) {
 func (a *App) Run(ctx context.Context) error {
 	go a.migrateLoop(ctx)
 	log.Printf("app[%s/%s]: listening on %s (work %dms, max inflight %d)", a.cfg.Site, a.cfg.Instance, a.cfg.Listen, a.cfg.WorkMS, a.cfg.MaxInflight)
-	return httpx.Serve(ctx, a.cfg.Listen, a.Handler())
+	return serve(ctx, a.cfg.Listen, a.Handler())
 }
 
 const schema = `
@@ -162,7 +179,7 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("GET /api/whoami", func(w http.ResponseWriter, r *http.Request) {
-		httpx.WriteJSON(w, http.StatusOK, a.whoami())
+		writeJSON(w, http.StatusOK, a.whoami())
 	})
 	mux.HandleFunc("GET /api/entries", a.listEntries)
 	mux.HandleFunc("POST /api/entries", a.createEntry)
@@ -171,7 +188,7 @@ func (a *App) Handler() http.Handler {
 		if !a.work(r.Context()) {
 			return
 		}
-		httpx.WriteJSON(w, http.StatusOK, a.whoami())
+		writeJSON(w, http.StatusOK, a.whoami())
 	})
 	mux.HandleFunc("GET /{$}", a.page)
 	return a.withServedBy(mux)
@@ -263,7 +280,7 @@ func (a *App) listEntries(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	entries, err := a.recent(ctx, 30)
 	if err != nil {
-		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	var total int64
@@ -271,7 +288,7 @@ func (a *App) listEntries(w http.ResponseWriter, r *http.Request) {
 	if entries == nil {
 		entries = []Entry{}
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"served_by": a.whoami(), "total": total, "entries": entries})
+	writeJSON(w, http.StatusOK, map[string]any{"served_by": a.whoami(), "total": total, "entries": entries})
 }
 
 type createReq struct {
@@ -284,8 +301,8 @@ type createReq struct {
 func (a *App) createEntry(w http.ResponseWriter, r *http.Request) {
 	var req createReq
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
-		if err := httpx.ReadJSON(r, &req); err != nil {
-			httpx.Error(w, http.StatusBadRequest, err.Error())
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	} else {
@@ -298,7 +315,7 @@ func (a *App) createEntry(w http.ResponseWriter, r *http.Request) {
 		req.Name = "익명"
 	}
 	if req.Message == "" {
-		httpx.Error(w, http.StatusBadRequest, "message is required")
+		writeError(w, http.StatusBadRequest, "message is required")
 		return
 	}
 	if len([]rune(req.Name)) > 40 {
@@ -340,14 +357,14 @@ func (a *App) createEntry(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond)
 	}
 	if err != nil {
-		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"id": id, "served_by": a.whoami()})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "served_by": a.whoami()})
 }
 
 // listSeqs returns the sequence numbers stored for a probe client, used to
@@ -357,25 +374,25 @@ func (a *App) listSeqs(w http.ResponseWriter, r *http.Request) {
 	from, _ := strconv.ParseInt(r.URL.Query().Get("from"), 10, 64)
 	to, err := strconv.ParseInt(r.URL.Query().Get("to"), 10, 64)
 	if client == "" || err != nil {
-		httpx.Error(w, http.StatusBadRequest, "client and to are required")
+		writeError(w, http.StatusBadRequest, "client and to are required")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	rows, err := a.pool.Query(ctx, `SELECT seq FROM entries WHERE client_id = $1 AND seq BETWEEN $2 AND $3 ORDER BY seq`, client, from, to)
 	if err != nil {
-		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	seqs, err := pgx.CollectRows(rows, pgx.RowTo[int64])
 	if err != nil {
-		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	if seqs == nil {
 		seqs = []int64{}
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"seqs": seqs})
+	writeJSON(w, http.StatusOK, map[string]any{"seqs": seqs})
 }
 
 func errString(err error) string {
@@ -383,4 +400,57 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func env(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if n, err := strconv.Atoi(env(key, "")); err == nil {
+		return n
+	}
+	return def
+}
+
+func serve(ctx context.Context, addr string, h http.Handler) error {
+	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+		return nil
+	case err := <-errc:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(code)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
+}
+
+func writeError(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+func readJSON(r *http.Request, v any) error {
+	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil || len(bytes.TrimSpace(data)) == 0 {
+		return err
+	}
+	return json.Unmarshal(data, v)
 }

@@ -7,7 +7,7 @@
 | 항목 | 근거 | 상태 |
 |---|---|---|
 | 소스 링크 | `https://github.com/hyunsuhahaha/spillway` | 로컬 변경사항은 아직 커밋·푸시 전. 제출 전 반영 필요 |
-| 원터치 배포 | `python scripts/deploy_webapp.py --target local` → 실제 HTTP 200 | 로컬 Docker 실검증. 후보 헬스체크·교체·롤백 테스트 포함 |
+| 원터치 배포 | `python scripts/deploy_webapp.py --target spillway` → 배포한 이미지가 로컬 앱이자 버스트 인스턴스 | 로컬 Docker 실검증(첫 배포·재배포). 후보 헬스체크·교체·롤백 단위 테스트 포함 |
 | 자동 검증 | `.github/workflows/verify.yml` | Go 레이스 테스트·정적 검사, Python 배포/롤백 테스트, 예제 이미지 빌드. GitHub 실행은 푸시 후 확인 필요 |
 | 클라우드 배포 | 동일 명령의 `--target cloudrun` 경로 | 코드·모의 테스트만. GCP 프로젝트 없음. **실검증 미완료** |
 | 버스팅·대피 | `scripts/sim.sh`, `scripts/e2e.py`, `docs/verification.md` | 단일 PC Docker 시뮬레이션 검증. 실제 GCP/AWS 미검증 |
@@ -20,7 +20,7 @@
 ## 점수에 직결되는 남은 위험
 
 1. **실제 클라우드 미검증**: 평가표의 클라우드 활용 30점과 로컬·클라우드 양쪽 즉시 시연 조건을 충족했다고 말할 수 없다. 킥오프에는 팀당 인프라 비용 30만 원 지원이 명시돼 있다. 팀 대표자가 신청하고 프로젝트·결제 권한을 준비해야 실배포를 할 수 있다.
-2. **제품 경계**: `deploy_webapp.py`의 임의 웹앱 배포는 상태 없는 앱용이고, DB 버스팅·대피는 내장 방명록에 한정된다. 둘이 완전히 통합된 범용 배포·DR 시스템이라고 발표하면 안 된다.
+2. **제품 경계**: 배포 입구와 런타임은 `--target spillway`로 합쳤다. 다만 앱은 README의 앱 계약(`/healthz`, `DB_URL`로 받는 Postgres, 상태 없음)을 지켜야 하고, E2E 실측은 `examples/guestbook`으로만 했다. "아무 앱이나 DR된다"고 말하면 안 된다.
 3. **AI 10점**: 구현에 AI 도구를 쓴 사실만으로 앱 내부의 AI 기능을 주장하지 않는다. `docs/ai-usage.md`에 현재 확인 가능한 사용을 정리했다. 팀 Notion에는 실제 프롬프트·검증·수정 과정만 추가한다.
 4. **팀 개발 20점**: 팀원별 실제 기여·대안 비교·회의 과정은 팀이 작성해야 한다. 자동 생성 문서로 대체할 수 없다.
 

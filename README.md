@@ -10,19 +10,39 @@ SoftBank Hackathon 2026 (테마: *One Action, Infinite Clouds*) 예선 제출물
 
 ## 한 번의 배포 동작 (제출 데모 입구)
 
-로컬에서 만든 Dockerfile 기반 웹앱을 한 명령으로 배포한다. 기본 예제는 [`examples/hello`](examples/hello)이며, 다른 **상태 없는 HTTP 앱**도 `--source`로 지정할 수 있다. 새 버전을 후보 컨테이너에서 먼저 헬스체크하고, 로컬 배포 실패 시 이전 이미지로 되돌린다.
+로컬에서 만든 Dockerfile 기반 웹앱을 한 명령으로 Spillway에 올린다. 그 앱이 그대로 로컬 앱이 되고, 버스트 인스턴스가 되고, 장애 시 대피한다.
 
 ```bash
-python scripts/deploy_webapp.py --target local
-# http://127.0.0.1:18081
-
-# GCP 프로젝트·Artifact Registry·결제 설정을 준비한 경우에만:
-python scripts/deploy_webapp.py --target cloudrun --project YOUR_PROJECT --public
+python scripts/deploy_webapp.py --target spillway                              # 기본: examples/guestbook
+python scripts/deploy_webapp.py --target spillway --source path/to/your-app   # 앱 계약을 지킨 아무 앱
+# 사용자 URL http://localhost:8080 · 대시보드 http://localhost:8090
 ```
 
-`--target both`는 동일 소스를 Cloud Run과 로컬에 순서대로 배포하지만 두 환경 간 원자적 전환은 아니다. Cloud Run 경로는 명령·응답을 모의 테스트했으나 **실제 GCP 프로젝트가 없어 실배포하지 못했다**. 상세 조건과 정리 방법: [웹앱 배포](docs/deploy-webapp.md).
+1. 소스의 Dockerfile로 이미지를 빌드한다.
+2. 런타임이 없으면 이 이미지로 전체 런타임을 띄운다(`sim.sh up`).
+3. 런타임이 떠 있으면, 같은 로컬 DB에 붙은 **후보 컨테이너**로 `/healthz`를 먼저 확인한다.
+4. 로컬 앱을 새 이미지로 교체하고, 이후 버스트 인스턴스도 이 이미지로 뜨도록 설정한다(`deploy/sim/.env`의 `SPILLWAY_APP_IMAGE`).
+5. 엣지가 새 로컬 앱을 정상으로 볼 때까지 기다린다. 실패하면 이전 이미지로 되돌린다.
 
-이 배포 경로와 아래의 하이브리드 버스팅·DB 대피 런타임은 구분된다. 현재 버스팅·DB 대피는 **내장 방명록 앱**에 대해 검증했으며, 임의의 `--source` 앱까지 자동으로 DB 복제·대피시키는 기능으로 주장하지 않는다.
+Spillway 없이 컨테이너 하나만 띄우는 경로도 남아 있다. `--target local`은 `127.0.0.1:18081`에 컨테이너 하나를 띄우고, `--target cloudrun --project … --public`은 독립 Cloud Run 서비스로 배포한다. 둘 다 상태 없는 앱용이다. Cloud Run 경로는 모의 테스트만 했고, **실제 GCP 프로젝트가 없어 실배포하지 못했다**. 상세: [웹앱 배포](docs/deploy-webapp.md).
+
+### 앱 계약
+
+Spillway는 앱 코드를 모른다. 아래 조건만 지키면 어떤 앱이든 로컬 앱과 버스트 인스턴스로 쓸 수 있다.
+
+| 조건 | 이유 |
+|---|---|
+| `PORT`(8080)에서 HTTP로 응답 | 엣지가 로컬 앱과 버스트 인스턴스에 트래픽을 보낸다 |
+| `GET /healthz`가 준비됐을 때 200 | 엣지 헬스체크와 배포 후보 검사 |
+| DB는 Postgres이고, 주소는 **`DB_URL`로만** 받는다 | 버스트 인스턴스는 dbrouter를 거쳐 접속한다. 대피 시 앱을 재시작하지 않고 대상 DB만 바뀐다 |
+| 앱 인스턴스에 상태를 두지 않는다(세션, 업로드 파일 등) | 요청이 로컬과 클라우드를 오가고, 대피하면 로컬 디스크는 사라진다 |
+| 연결 오류 시 DB 재연결 | 전환 중에는 dbrouter가 기존 연결을 끊는다 |
+| (선택) `SITE`를 응답에 표시 | 어느 사이트가 처리했는지 보여 준다 |
+| (선택) `POST /api/entries`와 `GET /api/seqs` | probe가 번호 붙은 쓰기로 **유실 건수·체감 RTO**를 측정한다. 없으면 측정만 못 한다 |
+
+[`examples/guestbook`](examples/guestbook)은 이 계약을 지키는 평범한 Go 앱이다. Spillway 코드를 import하지 않는다. `WORK_MS`와 `MAX_INFLIGHT`는 "작은 사내 서버"를 흉내 내려는 이 예제만의 설정이다.
+
+**검증 범위**: 아래의 버스팅·대피 E2E 수치는 `examples/guestbook`을 이 경로로 배포해 측정했다. 계약을 지킨 다른 앱도 같은 경로로 동작하도록 만들었지만, 다른 앱으로 E2E를 돌린 적은 없다.
 
 ---
 
@@ -39,7 +59,7 @@ python scripts/deploy_webapp.py --target cloudrun --project YOUR_PROJECT --publi
 
 ## 검증 결과 (단일 PC 시뮬레이션, E2E 자동 테스트)
 
-`python scripts/e2e.py`가 아래 시나리오를 실제로 실행하고 측정한다. 최신 재검증 결과: [docs/verification-check.md](docs/verification-check.md). 이전 결과는 [docs/verification.md](docs/verification.md)에 보관했다.
+`python scripts/deploy_webapp.py --target spillway`로 `examples/guestbook`을 올린 뒤 `python scripts/e2e.py`가 아래 시나리오를 실제로 실행하고 측정한다. 최신 재검증 결과: [docs/verification-check.md](docs/verification-check.md). 이전 결과는 [docs/verification.md](docs/verification.md)에 보관했다.
 
 | 시나리오 | 기본 (예열 0개) | 예열 1개 (`CLOUD_WARM_MIN=1`) |
 |---|---|---|
@@ -98,7 +118,7 @@ flowchart LR
 | `siteagent` | 사이트별 Postgres 감독. 주 DB 초기화 / 복제본 클론, 역할·LSN·복제 지연 보고, 승격·쓰기 차단·재구성 |
 | `dbrouter` | 버스트 인스턴스의 DB 접속점. 일시정지·연결 종료·대상 전환으로 앱 재시작 없이 주 DB를 바꿈 |
 | `probe` | 0.2초마다 번호 붙은 쓰기 → 다시 읽어서 유실 건수, 성공 사이 최대 공백(사용자 체감 RTO) 측정. 부하 생성기 |
-| `app` | 데모용 방명록. 응답마다 처리한 사이트 표시. 용량 제한(`WORK_MS`, `MAX_INFLIGHT`)으로 "작은 사내 서버"를 재현 |
+| 사용자 앱 | Spillway 바깥의 앱([앱 계약](#앱-계약)). 예제 `examples/guestbook`은 방명록이고, 응답마다 처리한 사이트를 표시한다 |
 | 버스트 어댑터 | GCP Cloud Run(서비스 최소 인스턴스), AWS Fargate(desiredCount, SigV4 서명), Docker(시뮬레이션) |
 
 설계 배경, 결정 기록(ADR 15개), 구현하면서 바꾼 결정: **[docs/design.md](docs/design.md)**
@@ -196,11 +216,12 @@ internal/control     컨트롤 플레인 + 대시보드(dashboard.html)
 internal/siteagent   Postgres 감독
 internal/dbrouter    전환 가능한 TCP 프록시
 internal/probe       유실/RTO 측정 + 부하 생성
-internal/app         데모 앱 (page.html)
 internal/cloud       Cloud Run / Fargate / Docker 어댑터
 internal/metrics     슬라이딩 윈도 백분위
 deploy/              sim · local · cloud · gcp · aws
-scripts/             sim.sh · e2e.py · push-images.sh · deploy-anchor.sh
+examples/guestbook   예제 사용자 앱 (별도 Go 모듈, 앱 계약 준수)
+examples/hello       상태 없는 예제 앱
+scripts/             deploy_webapp.py · sim.sh · e2e.py · push-images.sh · deploy-anchor.sh
 docs/                설계 · 배포 · 데모 · 검증 결과
 ```
 
@@ -219,6 +240,7 @@ docs/                설계 · 배포 · 데모 · 검증 결과
 - **실제 클라우드 미검증.** Cloud Run·Fargate 어댑터와 Terraform은 코드 작성과 정적 검증까지만 했다. 첫 실제 배포는 [docs/deploy.md](docs/deploy.md)의 문제 해결 표를 참고.
 - **긴급 대피의 RPO**: 비동기 복제라 이론상 마지막 몇 건이 유실될 수 있다(프로브로 실측, 시뮬레이션 0건). 계획된 이사·페일백은 RPO 0. 동기 복제 스위치 제공.
 - **앵커 VM은 단일 장애점**: 로컬 장애는 견디지만 앵커 VM 장애는 견디지 못한다.
-- **범위**: 앱 1개, Postgres 1개. 파일 스토리지, 여러 앱은 제외.
+- **범위**: 앱 1개, Postgres 1개. 파일 스토리지, 여러 앱은 제외. 앱은 [앱 계약](#앱-계약)을 지켜야 한다.
+- **배포 시 떠 있던 버스트 인스턴스**: 새 버전을 배포해도 이미 떠 있던 버스트 인스턴스는 축소될 때까지 이전 이미지로 돈다.
 - **페일백은 전체 재복제**(`pg_basebackup`): DB가 크면 오래 걸린다. `pg_rewind`로 개선 가능.
 - **AI 미적용**: 의도적으로 인프라 뼈대부터 만들었다. [design.md 8장](docs/design.md#8-ai-적용-보류)

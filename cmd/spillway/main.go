@@ -4,8 +4,10 @@
 //	spillway control    control plane + dashboard
 //	spillway siteagent  Postgres supervisor for one site
 //	spillway dbrouter   switchable Postgres TCP proxy
-//	spillway app        sample guestbook web app
 //	spillway probe      data-loss / RTO probe and load generator
+//
+// The web app itself is not part of Spillway: any image that follows the app
+// contract (see examples/guestbook) runs as the local app and burst instances.
 package main
 
 import (
@@ -16,7 +18,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"spillway/internal/app"
 	"spillway/internal/control"
 	"spillway/internal/dbrouter"
 	"spillway/internal/edge"
@@ -48,11 +49,6 @@ func main() {
 		err = siteagent.New(siteagent.ConfigFromEnv()).Run(ctx)
 	case "dbrouter":
 		err = dbrouter.New(dbrouter.ConfigFromEnv()).Run(ctx)
-	case "app":
-		var a *app.App
-		if a, err = app.New(app.ConfigFromEnv()); err == nil {
-			err = a.Run(ctx)
-		}
 	case "probe":
 		err = probe.New(probe.ConfigFromEnv()).Run(ctx)
 	case "version":
@@ -67,5 +63,5 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: spillway <edge|control|siteagent|dbrouter|app|probe|version>")
+	fmt.Fprintln(os.Stderr, "usage: spillway <edge|control|siteagent|dbrouter|probe|version>")
 }

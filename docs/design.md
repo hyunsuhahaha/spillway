@@ -50,8 +50,9 @@
 - AI 기능: 뼈대 완성 후 별도 검토 (8장).
 
 ### 배포 입구와 런타임의 경계
-- 킥오프에서 요구하는 **로컬 웹앱의 원터치 배포**를 위해 `scripts/deploy_webapp.py`를 추가했다. Dockerfile이 있는 상태 없는 HTTP 앱을 Docker 또는 Cloud Run에 배포한다. 로컬에서는 후보 헬스체크 후 교체하며 실패 시 이전 이미지를 복구한다. Cloud Run 경로는 프로젝트 부재로 모의 테스트까지만 했다.
-- 아래 버스팅·Postgres 대피 런타임은 **내장 방명록 앱**에 대해 설계·검증했다. 임의의 배포 앱에 DB 복제와 장애 대피가 자동 적용되지는 않는다. 이것은 제출 때 밝혀야 할 제품 경계다.
+- 킥오프에서 요구하는 **로컬 웹앱의 원터치 배포**는 `scripts/deploy_webapp.py --target spillway`다. 사용자 앱을 빌드하고, 같은 로컬 DB에 붙인 후보 컨테이너로 헬스체크한 뒤, 그 이미지를 로컬 앱과 버스트 이미지로 동시에 교체한다. 실패하면 이전 이미지로 되돌린다.
+- **[변경]** 초기에는 방명록이 Spillway 바이너리 안(`spillway app`)에 있어서, 배포 입구와 버스팅·대피 런타임이 따로 놀았다. 방명록을 `examples/guestbook`(별도 Go 모듈)으로 빼고, 런타임이 받는 것을 "앱 계약"(README)으로 좁혔다: `PORT`, `GET /healthz`, `DB_URL`로만 받는 Postgres, 상태 없는 인스턴스.
+- 검증 경계: 버스팅·대피 E2E는 `examples/guestbook`으로만 돌렸다. 계약을 지킨 다른 앱도 같은 경로를 타지만 E2E 실측은 없다. 계약을 지키지 않는 앱(로컬 파일 저장, DB 주소 하드코딩, Postgres 외 DB)은 대피 시 데이터를 잃을 수 있다.
 - 배포 서비스가 앱 자체보다 평가 대상이라는 킥오프 기준에 맞춰, 데모 첫 장면은 `source → build → readiness → URL`의 실제 실행으로 구성한다.
 
 ---
@@ -132,7 +133,7 @@ flowchart TB
 | `siteagent` | 사이트별 Postgres 감독. 주 DB 초기화/복제본 클론, 상태(역할·LSN·복제 지연) 보고, 승격·쓰기 차단(fence)·재구성 | `internal/siteagent` |
 | `dbrouter` | 버스트 인스턴스의 DB 접속점. 일시정지(새 연결 대기)·기존 연결 종료·대상 전환 | `internal/dbrouter` |
 | `probe` | 0.2초마다 번호 붙은 쓰기 → 다시 읽어 **유실 건수** 계산, 성공 사이 최대 공백 = **사용자 체감 RTO**, 부하 생성기 | `internal/probe` |
-| `app` | 데모용 방명록. 응답마다 처리한 사이트 표시, 멱등 쓰기, 용량 제한(`WORK_MS`, `MAX_INFLIGHT`) | `internal/app` |
+| 사용자 앱 | Spillway 바깥. 앱 계약(README)만 지키면 된다. 예제 방명록은 응답마다 처리한 사이트 표시, 멱등 쓰기, 용량 제한(`WORK_MS`, `MAX_INFLIGHT`) | `examples/guestbook` |
 | 버스트 어댑터 | Cloud Run(서비스 최소 인스턴스), ECS Fargate(desiredCount, SigV4), Docker Engine API | `internal/cloud` |
 
 ### 4.2 핵심 설계 원칙

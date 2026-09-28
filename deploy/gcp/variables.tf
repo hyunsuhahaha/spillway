@@ -22,7 +22,7 @@ variable "machine_type" {
 }
 
 variable "app_image" {
-  description = "Image for Cloud Run (defaults to <region>-docker.pkg.dev/<project>/spillway/spillway:latest)"
+  description = "Image for Cloud Run (defaults to <region>-docker.pkg.dev/<project>/spillway/guestbook:latest)"
   type        = string
   default     = ""
 }

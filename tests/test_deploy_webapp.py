@@ -5,6 +5,7 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -139,6 +140,91 @@ class DeployWebAppTests(unittest.TestCase):
         self.assertTrue(any(c[:3] == ["docker", "buildx", "build"] and "--push" in c for c in calls))
         self.assertTrue(any(c[:3] == ["gcloud", "run", "deploy"] and "--allow-unauthenticated" in c for c in calls))
         health.assert_called_once_with("https://demo.example/healthz")
+
+
+class SpillwayRuntime:
+    """A running simulation whose local-app serves spillway-demo/guestbook:old."""
+
+    def __init__(self):
+        self.calls = []
+        self.compose_calls = []
+
+    def docker(self, *args, check=True):
+        self.calls.append(args)
+        if args[0] == "inspect" and "{{.State.Running}}" in args:
+            return result(args, "true\n")
+        if args[0] == "inspect" and "{{.Config.Image}}" in args:
+            return result(args, "spillway-demo/guestbook:old\n")
+        if args[0] == "port":
+            return result(args, "127.0.0.1:32768\n")
+        return result(args)
+
+    def compose(self, project, *args):
+        self.compose_calls.append((project, args))
+        return result(args)
+
+
+def spillway_args():
+    return SimpleNamespace(name="guestbook", source=SCRIPT.parents[1] / "examples" / "guestbook", port=8080,
+                           health="/healthz", sim_project="spillway-sim", edge_port=8080, control_port=8090)
+
+
+class DeploySpillwayTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.sim_dir = Path(tmp.name)
+        (self.sim_dir / ".env").write_text("WORK_MS=25\nSPILLWAY_APP_IMAGE=spillway-demo/guestbook:old\n", encoding="utf-8")
+        self.rt = SpillwayRuntime()
+
+    def run_deploy(self, health=None, wait_local=None):
+        with patch.object(deploy, "SIM_DIR", self.sim_dir), \
+             patch.object(deploy, "docker", side_effect=self.rt.docker), \
+             patch.object(deploy, "compose", side_effect=self.rt.compose), \
+             patch.object(deploy, "wait_http", side_effect=health), \
+             patch.object(deploy, "wait_local_app", side_effect=wait_local), \
+             redirect_stdout(io.StringIO()):
+            return deploy.deploy_spillway(spillway_args(), "spillway-demo/guestbook:new", "release123")
+
+    def env(self):
+        return (self.sim_dir / ".env").read_text(encoding="utf-8")
+
+    def test_default_source_is_guestbook(self):
+        args = deploy.parse(["--target", "spillway"])
+        self.assertEqual(args.source.name, "guestbook")
+        self.assertEqual(args.name, "guestbook")
+
+    def test_candidate_then_app_and_burst_image_swap(self):
+        self.run_deploy()
+        run = next(c for c in self.rt.calls if c[0] == "run")
+        self.assertIn("spillway-sim_lan", run)
+        self.assertTrue(any(a.startswith("DB_URL=") and "@local-db:5432/" in a for a in run))
+        self.assertIn(("rm", "-f", "spillway-sim-candidate-release123"), self.rt.calls)
+        self.assertEqual(self.rt.compose_calls, [("spillway-sim", ("up", "-d", "--no-deps", "local-app", "control"))])
+        self.assertEqual(self.env(), "WORK_MS=25\nSPILLWAY_APP_IMAGE=spillway-demo/guestbook:new\n")
+
+    def test_unhealthy_candidate_changes_nothing(self):
+        def unhealthy(url):
+            raise deploy.DeployError("candidate unhealthy")
+
+        with self.assertRaisesRegex(deploy.DeployError, "candidate unhealthy"):
+            self.run_deploy(health=unhealthy)
+        self.assertIn(("rm", "-f", "spillway-sim-candidate-release123"), self.rt.calls)
+        self.assertEqual(self.rt.compose_calls, [])
+        self.assertIn("SPILLWAY_APP_IMAGE=spillway-demo/guestbook:old", self.env())
+
+    def test_failed_swap_restores_previous_image(self):
+        attempts = []
+
+        def local_app(url):
+            attempts.append(url)
+            if len(attempts) == 1:
+                raise deploy.DeployError("edge never saw it healthy")
+
+        with self.assertRaisesRegex(deploy.DeployError, "guestbook:old\\)으로 복구"):
+            self.run_deploy(wait_local=local_app)
+        self.assertEqual(len(self.rt.compose_calls), 2)
+        self.assertIn("SPILLWAY_APP_IMAGE=spillway-demo/guestbook:old", self.env())
 
 
 if __name__ == "__main__":
