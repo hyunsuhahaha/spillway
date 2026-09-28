@@ -22,9 +22,12 @@ jobs:
         run: |
           go test -race ./...
           go vet ./...
+          go -C examples/guestbook vet ./...
       - name: Deployment planner and rollback tests
         run: |
           python3 -m unittest discover -s tests -p 'test_*.py' -v
           python3 scripts/deploy_webapp.py --dry-run
-      - name: Example app builds
-        run: docker build -t spillway-hello:ci examples/hello
+      - name: Example apps build
+        run: |
+          docker build -t spillway-hello:ci examples/hello
+          docker build -t spillway-guestbook:ci examples/guestbook

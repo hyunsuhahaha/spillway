@@ -40,14 +40,16 @@ services:
     volumes: [local-db:/var/lib/postgresql/data]
     restart: unless-stopped
 
+  # Any image following the app contract (README "앱 계약"); default is
+  # examples/guestbook. It must match the image the cloud bursts with.
   local-app:
-    build: { context: ../.., target: app }
-    image: spillway:latest
+    build: { context: ../../examples/guestbook }
+    image: ${SPILLWAY_APP_IMAGE:-spillway-guestbook:latest}
     init: true
-    command: ["app"]
     network_mode: service:tailscale
     depends_on: [local-db]
     environment:
+      PORT: "8080"
       SITE: local
       INSTANCE: ${LOCAL_INSTANCE_NAME:-laptop}
       DB_URL: postgres://spillway:${APP_DB_PASSWORD}@127.0.0.1:5432/spillway?sslmode=disable

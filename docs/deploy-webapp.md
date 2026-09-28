@@ -1,6 +1,22 @@
 # 한 번의 웹앱 배포
 
-`scripts/deploy_webapp.py`는 로컬 소스의 Dockerfile을 빌드해 Docker 또는 Google Cloud Run에 배포한다. **상태 없는 HTTP 앱**용이다. Spillway의 Postgres 복제·대피 데모는 현재 내장 방명록 앱에서만 동작한다.
+`scripts/deploy_webapp.py`는 로컬 소스의 Dockerfile을 빌드해 배포한다.
+
+- `--target spillway`: Spillway 런타임에 올린다. 그 이미지가 로컬 앱이자 버스트 인스턴스가 되고, DB는 dbrouter를 거쳐 복제·대피된다. 앱은 README의 **앱 계약**을 지켜야 한다. 기본 소스는 `examples/guestbook`이다.
+- `--target local` / `cloudrun`: Spillway 없이 컨테이너 하나 또는 Cloud Run 서비스 하나만 띄운다. **상태 없는 HTTP 앱**용이다.
+
+## Spillway 런타임에 배포
+
+```bash
+python scripts/deploy_webapp.py --target spillway
+python scripts/deploy_webapp.py --target spillway --source path/to/app --name myapp
+```
+
+- 런타임이 없으면 `scripts/sim.sh up`으로 이 이미지를 넣어 전체를 띄운다.
+- 런타임이 있으면 `<project>_lan` 네트워크에 후보 컨테이너를 띄워, 로컬 DB에 붙은 상태로 `/healthz`를 검사한다. 통과하면 `deploy/sim/.env`의 `SPILLWAY_APP_IMAGE`를 바꾸고 `local-app`과 `control`을 다시 만든다. 컨트롤 플레인은 DB 역할로 모드를 복원한다.
+- 엣지가 새 로컬 앱을 90초 안에 정상으로 보지 못하면, 이전 이미지로 `.env`와 컨테이너를 되돌린다.
+- 이미 떠 있던 버스트 인스턴스는 축소될 때까지 이전 이미지다.
+- 대상은 단일 PC 시뮬레이션(`deploy/sim`)이다. 실제 GCP·AWS 구성에서는 `scripts/push-images.sh`에 `APP_SOURCE=<앱 폴더>`를 주어 같은 앱을 올린다(미검증).
 
 ## 로컬에서 실제 시연
 

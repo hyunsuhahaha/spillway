@@ -9,8 +9,13 @@
 # Burst instances are containers the control plane creates on "wan".
 name: ${SPILLWAY_SIM_PROJECT:-spillway-sim}
 
-# Images are built once by local-app / local-db (see scripts/sim.sh up);
-# every other service reuses them.
+# Spillway images are built once by edge / local-db (see scripts/sim.sh up);
+# every other Spillway service reuses them.
+#
+# The web app is not part of Spillway. SPILLWAY_APP_IMAGE is any image that
+# follows the app contract (README "앱 계약"); it runs as local-app and as every
+# burst instance. `python scripts/deploy_webapp.py --target spillway` builds
+# it and writes it to deploy/sim/.env. Default: the examples/guestbook image.
 x-app: &app
   image: ${SPILLWAY_SIM_IMAGE:-spillway:latest}
   pull_policy: never
@@ -41,14 +46,17 @@ services:
     networks: [lan, wan]
 
   local-app:
-    <<: *app
-    build: { context: ../.., target: app }
-    command: ["app"]
+    image: ${SPILLWAY_APP_IMAGE:-spillway-guestbook:latest}
+    pull_policy: never
+    restart: unless-stopped
+    init: true
     environment:
+      PORT: "8080"
       SITE: local
       INSTANCE: laptop
       DB_URL: postgres://spillway:${APP_DB_PASSWORD:-spillway-secret}@local-db:5432/spillway?sslmode=disable
       # Fixed capacity of the "small on-prem server": 3 concurrent x 25ms work.
+      # Guestbook-specific knobs; other apps ignore them.
       WORK_MS: ${WORK_MS:-25}
       MAX_INFLIGHT: ${LOCAL_MAX_INFLIGHT:-3}
     networks: [lan, wan]
@@ -76,6 +84,7 @@ services:
 
   edge:
     <<: *app
+    build: { context: ../.., target: app }
     command: ["edge"]
     environment:
       SPILLWAY_TOKEN: ${SPILLWAY_TOKEN:-}
@@ -106,10 +115,10 @@ services:
       LOCAL_PG_FOR_CLOUD: local-db:5432
       CLOUD_PROVIDERS: docker
       DOCKER_PROVIDER_NAME: sim-cloud
-      BURST_IMAGE: ${SPILLWAY_SIM_IMAGE:-spillway:latest}
+      BURST_IMAGE: ${SPILLWAY_APP_IMAGE:-spillway-guestbook:latest}
       BURST_NETWORK: ${SPILLWAY_SIM_PROJECT:-spillway-sim}_wan
       BURST_PREFIX: ${SPILLWAY_SIM_BURST_PREFIX:-spillway-burst}
-      BURST_ENV: SITE=cloud;DB_URL=postgres://spillway:${APP_DB_PASSWORD:-spillway-secret}@dbrouter:6432/spillway?sslmode=disable;WORK_MS=${WORK_MS:-25};MAX_INFLIGHT=${LOCAL_MAX_INFLIGHT:-3}
+      BURST_ENV: PORT=8080;SITE=cloud;DB_URL=postgres://spillway:${APP_DB_PASSWORD:-spillway-secret}@dbrouter:6432/spillway?sslmode=disable;WORK_MS=${WORK_MS:-25};MAX_INFLIGHT=${LOCAL_MAX_INFLIGHT:-3}
       BURST_P95_HIGH_MS: ${BURST_P95_HIGH_MS:-250}
       BURST_P95_LOW_MS: ${BURST_P95_LOW_MS:-120}
       BURST_MIN: ${BURST_MIN:-2}

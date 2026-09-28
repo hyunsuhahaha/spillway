@@ -35,7 +35,10 @@ burst_rm() {
 
 case "${1:-}" in
   up)
-    docker compose build local-app local-db
+    docker compose build edge local-db
+    # Default demo app. A deployed app (deploy_webapp.py --target spillway)
+    # is recorded in .env as SPILLWAY_APP_IMAGE and used instead.
+    docker build -q -t spillway-guestbook:latest ../../examples/guestbook >/dev/null
     docker compose up -d
     echo
     echo "  사용자 URL : http://localhost:${EDGE_PORT:-8080}"
@@ -48,7 +51,9 @@ case "${1:-}" in
   cut-local)
     for c in "${LOCAL_CONTAINERS[@]}"; do
       docker network disconnect "$WAN" "$c" 2>/dev/null || true
-      if docker inspect "$c" --format '{{json .NetworkSettings.Networks}}' | grep -Fq "\"$WAN\""; then
+      # Separate step so a failing docker inspect aborts instead of passing the check.
+      nets=$(docker inspect "$c" --format '{{json .NetworkSettings.Networks}}')
+      if grep -Fq "\"$WAN\"" <<<"$nets"; then
         echo "네트워크 분리 실패: $c" >&2
         exit 1
       fi
@@ -59,7 +64,8 @@ case "${1:-}" in
     for c in "${LOCAL_CONTAINERS[@]}"; do
       alias=${c#${PROJECT}-}; alias=${alias%-1}
       docker network connect --alias "$alias" "$WAN" "$c" 2>/dev/null || true
-      if ! docker inspect "$c" --format '{{json .NetworkSettings.Networks}}' | grep -Fq "\"$WAN\""; then
+      nets=$(docker inspect "$c" --format '{{json .NetworkSettings.Networks}}')
+      if ! grep -Fq "\"$WAN\"" <<<"$nets"; then
         echo "네트워크 복구 실패: $c" >&2
         exit 1
       fi

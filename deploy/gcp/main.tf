@@ -23,7 +23,7 @@ provider "google" {
 
 locals {
   registry  = "${var.region}-docker.pkg.dev/${var.project}/spillway"
-  app_image = var.app_image != "" ? var.app_image : "${local.registry}/spillway:latest"
+  app_image = var.app_image != "" ? var.app_image : "${local.registry}/guestbook:latest"
 }
 
 resource "google_project_service" "services" {
@@ -177,10 +177,14 @@ resource "google_cloud_run_v2_service" "app" {
       }
     }
     containers {
+      # Any image following the app contract (README "앱 계약").
       image = local.app_image
-      args  = ["app"]
       ports {
         container_port = 8080
+      }
+      env {
+        name  = "PORT"
+        value = "8080"
       }
       env {
         name  = "SITE"
@@ -201,9 +205,10 @@ resource "google_cloud_run_v2_service" "app" {
       resources {
         limits = { cpu = "1", memory = "512Mi" }
       }
+      # TCP, not /healthz: the contract does not promise a DB-free health path.
       startup_probe {
-        http_get {
-          path = "/api/whoami"
+        tcp_socket {
+          port = 8080
         }
         period_seconds    = 1
         failure_threshold = 30

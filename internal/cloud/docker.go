@@ -48,10 +48,10 @@ func NewDockerFromEnv() *Docker {
 	}
 	return &Docker{
 		name:    httpx.Env("DOCKER_PROVIDER_NAME", "sim-cloud"),
-		image:   httpx.Env("BURST_IMAGE", "spillway:latest"),
+		image:   httpx.Env("BURST_IMAGE", "spillway-guestbook:latest"),
 		network: httpx.Env("BURST_NETWORK", "spillway-sim_wan"),
 		prefix:  httpx.Env("BURST_PREFIX", "spillway-burst"),
-		cmd:     strings.Fields(httpx.Env("BURST_CMD", "app")),
+		cmd:     strings.Fields(httpx.Env("BURST_CMD", "")), // empty: the image's own entrypoint
 		env:     env,
 		port:    httpx.EnvInt("BURST_PORT", 8080),
 		nanoCPU: int64(cpus * 1e9),
@@ -180,7 +180,6 @@ func (d *Docker) create(ctx context.Context, i int) error {
 	env := append([]string{"INSTANCE=" + name}, d.env...)
 	body := map[string]any{
 		"Image":  d.image,
-		"Cmd":    d.cmd,
 		"Env":    env,
 		"Labels": map[string]string{"spillway.burst": d.prefix, "spillway.index": strconv.Itoa(i)},
 		"HostConfig": map[string]any{
@@ -188,6 +187,9 @@ func (d *Docker) create(ctx context.Context, i int) error {
 			"Init":        true,
 			"NanoCpus":    d.nanoCPU,
 		},
+	}
+	if len(d.cmd) > 0 {
+		body["Cmd"] = d.cmd
 	}
 	var created struct {
 		ID string `json:"Id"`

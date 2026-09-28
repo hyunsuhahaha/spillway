@@ -165,9 +165,9 @@ resource "aws_ecs_task_definition" "app" {
       name         = "app"
       image        = local.app_image
       essential    = true
-      command      = ["app"]
       portMappings = [{ containerPort = 8080, protocol = "tcp" }]
       environment = [
+        { name = "PORT", value = "8080" },
         { name = "SITE", value = "cloud-aws" },
         { name = "DB_URL", value = "postgres://spillway:${var.app_db_password}@${var.cloud_ts_ip}:6432/spillway?sslmode=disable" },
         { name = "DB_SOCKS5", value = "localhost:1055" },
